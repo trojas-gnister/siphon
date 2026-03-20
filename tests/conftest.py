@@ -34,15 +34,14 @@ def sample_config_dict():
                     "name": "company_name",
                     "type": "string",
                     "required": True,
+                    "db": {"table": "companies", "column": "name"},
                 },
             ],
-            "tables": [
-                {
-                    "name": "companies",
-                    "primary_key": "id",
-                    "fields": ["company_name"],
-                }
-            ],
+            "tables": {
+                "companies": {
+                    "primary_key": {"column": "id", "type": "auto_increment"},
+                },
+            },
         },
         "pipeline": {
             "chunk_size": 50,
