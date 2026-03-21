@@ -63,6 +63,13 @@ def setup_logging(
     console_handler.setFormatter(formatter)
     logger.addHandler(console_handler)
 
+    # Ensure the SQL logger has at least a NullHandler when no log_dir is given,
+    # so messages are silently discarded rather than triggering "no handlers" warnings.
+    sql_logger = logging.getLogger("siphon.sql")
+    sql_logger.handlers.clear()
+    sql_logger.propagate = False
+    sql_logger.addHandler(logging.NullHandler())
+
     if log_dir is not None:
         log_path = Path(log_dir)
         log_path.mkdir(parents=True, exist_ok=True)
