@@ -393,6 +393,10 @@ class TestSiphonConfig:
     def test_belongs_to_unknown_table_caught(self):
         """A belongs_to relationship referencing an unknown table must raise ValidationError."""
         data = _minimal_dict()
+        data["schema"]["fields"].append(
+            {"name": "parent_entity", "type": "string",
+             "db": {"table": "companies", "column": "parent_name"}}
+        )
         data["relationships"] = [
             {
                 "type": "belongs_to",
@@ -409,6 +413,10 @@ class TestSiphonConfig:
     def test_belongs_to_unknown_references_caught(self):
         """A belongs_to relationship with unknown 'references' table must raise."""
         data = _minimal_dict()
+        data["schema"]["fields"].append(
+            {"name": "parent_entity", "type": "string",
+             "db": {"table": "companies", "column": "parent_name"}}
+        )
         data["relationships"] = [
             {
                 "type": "belongs_to",
@@ -459,6 +467,22 @@ class TestSiphonConfig:
         assert cfg.pipeline.review is False
         assert cfg.pipeline.log_level == "info"
 
+    def test_belongs_to_unknown_field_caught(self):
+        """A belongs_to relationship referencing an unknown field must raise."""
+        data = _minimal_dict()
+        data["relationships"] = [
+            {
+                "type": "belongs_to",
+                "field": "nonexistent_field",
+                "table": "companies",
+                "references": "companies",
+                "fk_column": "parent_id",
+                "resolve_by": "name",
+            }
+        ]
+        with pytest.raises(ValidationError, match="unknown field"):
+            SiphonConfig.model_validate(data)
+
     def test_full_config_with_relationships(self):
         """Full config including both relationship types should parse correctly."""
         data = _minimal_dict()
@@ -469,6 +493,10 @@ class TestSiphonConfig:
         data["schema"]["fields"].append(
             {"name": "state", "type": "enum", "preset": "us_states",
              "db": {"table": "addresses", "column": "state_code"}}
+        )
+        data["schema"]["fields"].append(
+            {"name": "parent_entity", "type": "string",
+             "db": {"table": "companies", "column": "parent_name"}}
         )
         data["relationships"] = [
             {

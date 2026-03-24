@@ -40,13 +40,20 @@ class FieldDBConfig(BaseModel):
     column: str
 
 
+FieldType = Literal[
+    "string", "integer", "number", "currency",
+    "phone", "url", "email", "date", "datetime",
+    "enum", "boolean", "regex", "subdivision", "country",
+]
+
+
 class FieldConfig(BaseModel):
     """Definition of a single input field."""
 
     model_config = ConfigDict(populate_by_name=True)
 
     name: str
-    type: str
+    type: FieldType
     db: FieldDBConfig
     required: bool = False
 
@@ -73,6 +80,18 @@ class FieldConfig(BaseModel):
 
     # Subdivision type (e.g. us_states) — specifies which country's subdivisions to use
     country_code: str | None = None
+
+    @model_validator(mode="after")
+    def validate_constraint_ordering(self) -> "FieldConfig":
+        if self.min is not None and self.max is not None and self.min > self.max:
+            raise ValueError(
+                f"field '{self.name}': min ({self.min}) must be <= max ({self.max})"
+            )
+        if self.min_length is not None and self.max_length is not None and self.min_length > self.max_length:
+            raise ValueError(
+                f"field '{self.name}': min_length ({self.min_length}) must be <= max_length ({self.max_length})"
+            )
+        return self
 
 
 class PrimaryKeyConfig(BaseModel):
@@ -172,7 +191,7 @@ class PipelineConfig(BaseModel):
 
     chunk_size: int = 25
     review: bool = False
-    log_level: str = "info"
+    log_level: Literal["debug", "info", "warning", "error"] = "info"
     log_dir: str | None = None
 
 
@@ -200,6 +219,7 @@ class SiphonConfig(BaseModel):
     def cross_validate_references(self) -> "SiphonConfig":
         """Ensure every field's db.table and relationship tables exist in schema.tables."""
         known_tables = set(self.schema_.tables.keys())
+        known_field_names = {f.name for f in self.schema_.fields}
 
         # Validate field table references
         for field in self.schema_.fields:
@@ -212,6 +232,12 @@ class SiphonConfig(BaseModel):
         # Validate relationship table references
         for rel in self.relationships:
             if isinstance(rel, BelongsToRelationship):
+                if rel.field not in known_field_names:
+                    raise ValueError(
+                        f"belongs_to relationship fk_column='{rel.fk_column}' "
+                        f"references unknown field '{rel.field}'; "
+                        f"known fields: {sorted(known_field_names)}"
+                    )
                 for ref_table in (rel.table, rel.references):
                     if ref_table not in known_tables:
                         raise ValueError(
