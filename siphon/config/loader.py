@@ -124,3 +124,36 @@ def load_config(path: str | Path) -> SiphonConfig:
     _cross_validate(config)
 
     return config
+
+
+def validate_config(path: str | Path) -> list[str]:
+    """Validate a Siphon YAML config file.
+
+    Loads and validates the config. Returns a list of warnings (non-fatal issues).
+    Raises ConfigError for fatal issues (propagated from load_config).
+
+    Warnings may include:
+    - No deduplication configured
+    - No relationships defined
+    - review is disabled
+    """
+    config = load_config(path)
+
+    warnings: list[str] = []
+
+    if config.schema_.deduplication is None:
+        warnings.append(
+            "No deduplication configured; duplicate records will not be detected."
+        )
+
+    if not config.relationships:
+        warnings.append(
+            "No relationships defined; all data will be written as flat records."
+        )
+
+    if not config.pipeline.review:
+        warnings.append(
+            "review is disabled; extracted records will not be reviewed before insertion."
+        )
+
+    return warnings
