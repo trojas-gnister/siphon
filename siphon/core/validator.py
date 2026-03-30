@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from pydantic import ValidationError, create_model, field_validator
 
 from siphon.config.schema import SiphonConfig
 from siphon.config.types import get_formatter, resolve_preset
+
+logger = logging.getLogger(__name__)
 
 
 class Validator:
@@ -127,6 +130,87 @@ class Validator:
                 invalid.append({"record": record, "errors": exc.errors()})
 
         return valid, invalid
+
+    def deduplicate(
+        self,
+        records: list[dict],
+        existing_keys: set[tuple] | None = None,
+    ) -> tuple[list[dict], list[dict]]:
+        """Deduplicate records based on config.
+
+        Args:
+            records: Validated records to deduplicate
+            existing_keys: Pre-loaded keys from DB (if check_db is True).
+                          Each key is a tuple of field values, already normalized.
+
+        Returns:
+            (unique_records, duplicate_records)
+        """
+        dedup_config = self._config.schema_.deduplication
+        if dedup_config is None:
+            return records, []
+
+        key_fields = dedup_config.key
+        case_insensitive = dedup_config.match == "case_insensitive"
+
+        seen: set[tuple] = set()
+        if existing_keys:
+            seen.update(existing_keys)
+
+        unique = []
+        duplicates = []
+
+        for record in records:
+            key = self._build_dedup_key(record, key_fields, case_insensitive)
+            if key in seen:
+                duplicates.append(record)
+                logger.warning(f"Duplicate record skipped: {dict(zip(key_fields, key))}")
+            else:
+                seen.add(key)
+                unique.append(record)
+
+        return unique, duplicates
+
+    def _build_dedup_key(
+        self,
+        record: dict,
+        key_fields: list[str],
+        case_insensitive: bool,
+    ) -> tuple:
+        """Build a dedup key tuple from a record."""
+        values = []
+        for field in key_fields:
+            value = record.get(field, "")
+            if value is None:
+                value = ""
+            if case_insensitive and isinstance(value, str):
+                value = value.lower()
+            values.append(value)
+        return tuple(values)
+
+    @staticmethod
+    def build_existing_keys(
+        rows: list[dict],
+        key_fields: list[str],
+        case_insensitive: bool,
+    ) -> set[tuple]:
+        """Build a set of dedup keys from existing DB rows.
+
+        This is a static method so it can be called by the pipeline
+        to pre-load keys from the database before deduplication.
+        """
+        keys = set()
+        for row in rows:
+            values = []
+            for field in key_fields:
+                value = row.get(field, "")
+                if value is None:
+                    value = ""
+                if case_insensitive and isinstance(value, str):
+                    value = value.lower()
+                values.append(value)
+            keys.add(tuple(values))
+        return keys
 
 
 # ---------------------------------------------------------------------------
