@@ -1,0 +1,11 @@
+Company Name,Parent Entity,Phone,Website,Address,State
+"Acme Corp","","(555) 123-4567","acme.com","123 Main St","CA"
+"Acme West","Acme Corp","555.987.6543","https://acmewest.com","456 Oak Ave","CA"
+"Acme East","Acme Corp","5551112222","acmeeast.com","789 Pine Rd","NY"
+"Beta Inc","","555-333-4444","beta.io","321 Elm St","TX"
+"Beta South","Beta Inc","(555) 444-5555","betasouth.com","654 Maple Dr","FL"
+"Gamma LLC","","5556667777","gamma.org","987 Cedar Ln","WA"
+"Delta Corp","","(555) 777-8888","delta.com","111 Birch St","OR"
+"Acme Corp","","(555) 123-4567","acme.com","123 Main St","CA"
+"Epsilon","","5559990000","epsilon.net","222 Spruce Ave","IL"
+"Acme Central","Acme Corp","5551234000","acmecentral.com","333 Walnut Blvd","OH"

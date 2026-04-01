@@ -1,0 +1,80 @@
+name: "example-companies"
+
+llm:
+  base_url: "http://localhost:11434/v1"
+  model: "llama3"
+  api_key: ""
+
+database:
+  url: "sqlite+aiosqlite://"
+
+schema:
+  fields:
+    - name: company_name
+      type: string
+      required: true
+      min_length: 2
+      db:
+        table: companies
+        column: name
+    - name: parent_entity
+      type: string
+      db:
+        table: companies
+        column: parent_name
+    - name: phone
+      type: phone
+      db:
+        table: companies
+        column: phone_number
+    - name: website
+      type: url
+      db:
+        table: companies
+        column: website_url
+    - name: address
+      type: string
+      min_length: 5
+      db:
+        table: addresses
+        column: full_address
+    - name: state
+      type: enum
+      preset: us_states
+      db:
+        table: addresses
+        column: state_code
+
+  tables:
+    companies:
+      primary_key:
+        column: id
+        type: auto_increment
+    addresses:
+      primary_key:
+        column: id
+        type: auto_increment
+
+  deduplication:
+    key: [company_name]
+    check_db: false
+    match: case_insensitive
+
+relationships:
+  - type: belongs_to
+    field: parent_entity
+    table: companies
+    references: companies
+    fk_column: parent_id
+    resolve_by: name
+  - type: junction
+    link: [companies, addresses]
+    through: company_addresses
+    columns:
+      companies: company_id
+      addresses: address_id
+
+pipeline:
+  chunk_size: 25
+  review: false
+  log_level: info
