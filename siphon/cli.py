@@ -80,6 +80,195 @@ def validate(
         raise typer.Exit(code=1)
 
 
+INIT_TEMPLATE = '''# Siphon ETL Pipeline Configuration
+# ===================================
+# This file configures the Siphon data pipeline.
+# Uncomment and modify sections as needed.
+
+name: "my-pipeline"
+
+# LLM Configuration
+# -----------------
+# Siphon uses any OpenAI-compatible API for data extraction.
+# Works with: OpenAI, Ollama, vLLM, LM Studio
+llm:
+  base_url: "http://localhost:11434/v1"  # Ollama default
+  model: "llama3"
+  api_key: ""  # Required for OpenAI, optional for local models
+  # extraction_hints: |
+  #   Optional domain-specific instructions for the LLM.
+  #   Example: "If company name is missing, use city name instead."
+
+# Database Configuration
+# ----------------------
+# Any SQLAlchemy-supported database. Install the appropriate driver.
+# Examples:
+#   SQLite:      sqlite+aiosqlite:///data.db
+#   PostgreSQL:  postgresql+asyncpg://user:pass@localhost/dbname
+#   MySQL:       mysql+aiomysql://user:pass@localhost/dbname
+database:
+  url: "${DATABASE_URL}"  # Environment variable substitution supported
+
+# Schema Definition
+# -----------------
+schema:
+  fields:
+    # String field (strips whitespace)
+    - name: company_name
+      type: string
+      required: true
+      min_length: 2
+      # max_length: 255
+      db:
+        table: companies
+        column: name
+
+    # Phone field (formats as US phone number)
+    # - name: phone
+    #   type: phone
+    #   db:
+    #     table: companies
+    #     column: phone_number
+
+    # URL field (prepends http:// if missing)
+    # - name: website
+    #   type: url
+    #   db:
+    #     table: companies
+    #     column: website_url
+
+    # Email field (lowercased)
+    # - name: email
+    #   type: email
+    #   db:
+    #     table: companies
+    #     column: email
+
+    # Integer field
+    # - name: employee_count
+    #   type: integer
+    #   min: 0
+    #   max: 1000000
+    #   db:
+    #     table: companies
+    #     column: employees
+
+    # Number (float) field
+    # - name: revenue
+    #   type: number
+    #   db:
+    #     table: companies
+    #     column: revenue
+
+    # Currency field (strips $, commas; returns Decimal)
+    # - name: annual_revenue
+    #   type: currency
+    #   db:
+    #     table: companies
+    #     column: revenue
+
+    # Date field (flexible input, configurable output format)
+    # - name: founded_date
+    #   type: date
+    #   format: "%Y-%m-%d"
+    #   db:
+    #     table: companies
+    #     column: founded
+
+    # Datetime field
+    # - name: last_updated
+    #   type: datetime
+    #   format: "%Y-%m-%dT%H:%M:%S"
+    #   db:
+    #     table: companies
+    #     column: updated_at
+
+    # Enum field (with explicit values)
+    # - name: status
+    #   type: enum
+    #   values: [active, inactive, pending]
+    #   case: upper  # upper | lower | preserve
+    #   db:
+    #     table: companies
+    #     column: status
+
+    # Enum field (with preset -- US states via pycountry)
+    # - name: state
+    #   type: enum
+    #   preset: us_states
+    #   db:
+    #     table: addresses
+    #     column: state_code
+
+    # Boolean field (detects yes/no/true/false/1/0)
+    # - name: is_active
+    #   type: boolean
+    #   db:
+    #     table: companies
+    #     column: active
+
+    # Regex field (validates against pattern)
+    # - name: tax_id
+    #   type: regex
+    #   pattern: "^\\\\d{2}-\\\\d{7}$"
+    #   db:
+    #     table: companies
+    #     column: tax_id
+
+    # Subdivision field (ISO 3166-2 subdivision codes)
+    # - name: province
+    #   type: subdivision
+    #   country_code: CA  # ISO 3166-1 alpha-2 country code
+    #   db:
+    #     table: addresses
+    #     column: province_code
+
+    # Country field (ISO 3166-1 alpha-2 country codes)
+    # - name: country
+    #   type: country
+    #   db:
+    #     table: addresses
+    #     column: country_code
+
+  tables:
+    companies:
+      primary_key:
+        column: id
+        type: auto_increment  # auto_increment | uuid
+
+  # Deduplication (optional)
+  # deduplication:
+  #   key: [company_name]       # Fields to match on
+  #   check_db: true            # Also check existing DB rows
+  #   match: case_insensitive   # exact | case_insensitive
+
+# Relationships (optional)
+# relationships:
+#   # Foreign key relationship
+#   - type: belongs_to
+#     field: parent_entity      # Schema field containing the reference
+#     table: companies          # Table that gets the FK column
+#     references: companies     # Target table
+#     fk_column: parent_id      # Auto-generated FK column name
+#     resolve_by: name          # Match against this column in target table
+#
+#   # Many-to-many junction table
+#   - type: junction
+#     link: [companies, addresses]
+#     through: company_addresses
+#     columns:
+#       companies: company_id
+#       addresses: address_id
+
+# Pipeline Options
+pipeline:
+  chunk_size: 25        # Rows per LLM extraction batch
+  review: true          # Enable human-in-the-loop review
+  log_level: info       # debug | info | warning | error
+  # log_dir: ./logs     # Directory for log files
+'''
+
+
 @app.command()
 def init() -> None:
     """Generate a starter siphon.yaml config file."""
@@ -89,10 +278,7 @@ def init() -> None:
         if not confirm:
             raise typer.Exit()
 
-    target.write_text(
-        "# Siphon config placeholder\n"
-        "# Run 'siphon init' after Task 21 for the full template\n"
-    )
+    target.write_text(INIT_TEMPLATE)
     console.print(f"[green]Created {target}[/green]")
 
 
