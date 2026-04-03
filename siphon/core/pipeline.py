@@ -127,6 +127,12 @@ class Pipeline:
         result.total_invalid = len(invalid_records)
         result.invalid_records = invalid_records
 
+        if invalid_records:
+            for inv in invalid_records:
+                logger.warning(
+                    "Validation failed for record: %s", inv["errors"]
+                )
+
         if not valid_records:
             logger.warning("No valid records after validation")
             return result

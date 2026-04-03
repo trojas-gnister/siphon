@@ -85,7 +85,10 @@ class Extractor:
             chunk_size,
         )
 
-        tasks = [self._extract_chunk(chunk, i) for i, chunk in enumerate(chunks)]
+        tasks = []
+        for i, chunk in enumerate(chunks):
+            start_row = i * chunk_size + 1  # 1-based row numbers
+            tasks.append(self._extract_chunk(chunk, i, start_row))
         results = await asyncio.gather(*tasks)
 
         all_records: list[dict] = []
@@ -109,9 +112,14 @@ class Extractor:
     # ------------------------------------------------------------------
 
     async def _extract_chunk(
-        self, chunk_df: pd.DataFrame, chunk_index: int
+        self, chunk_df: pd.DataFrame, chunk_index: int, start_row: int
     ) -> list[dict]:
         """Extract data from a single chunk via the LLM.
+
+        Args:
+            chunk_df: The chunk DataFrame
+            chunk_index: Index of this chunk (0-based)
+            start_row: The starting row number in the original spreadsheet (1-based)
 
         Retry strategy
         --------------
@@ -122,9 +130,10 @@ class Extractor:
         """
         chunk_csv = chunk_df.to_csv(index=False)
         row_count = len(chunk_df)
+        end_row = start_row + row_count - 1
+        row_range = f"rows {start_row}-{end_row}"
         fields = self._config.schema_.fields
         hints = self._config.llm.extraction_hints
-        chunk_size = self._config.pipeline.chunk_size
 
         prompt = build_extraction_prompt(fields, chunk_csv, row_count, hints)
 
@@ -133,13 +142,12 @@ class Extractor:
             records = await self._llm.extract_json(prompt)
         except ExtractionError as exc:
             logger.warning("Chunk %d: LLM extraction failed: %s", chunk_index, exc)
-            start_row = chunk_index * chunk_size + 1
-            end_row = chunk_index * chunk_size + row_count
             self._skipped_chunks.append(
                 {
                     "chunk": chunk_index,
+                    "row_range": row_range,
+                    "rows_affected": row_count,
                     "reason": f"LLM error: {exc}",
-                    "rows": f"{start_row}-{end_row}",
                 }
             )
             return []
@@ -162,6 +170,8 @@ class Extractor:
                 self._skipped_chunks.append(
                     {
                         "chunk": chunk_index,
+                        "row_range": row_range,
+                        "rows_affected": row_count,
                         "reason": f"Retry failed: {exc}",
                     }
                 )
@@ -176,6 +186,8 @@ class Extractor:
                 self._skipped_chunks.append(
                     {
                         "chunk": chunk_index,
+                        "row_range": row_range,
+                        "rows_affected": row_count,
                         "reason": (
                             f"Row count mismatch: expected {row_count}, "
                             f"got {len(records)}"
