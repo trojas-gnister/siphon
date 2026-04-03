@@ -73,6 +73,27 @@ def _write_invalid_config(tmp_path: Path) -> Path:
 
 
 # ---------------------------------------------------------------------------
+# --version
+# ---------------------------------------------------------------------------
+
+
+class TestVersion:
+    def test_version_flag_exits_zero(self):
+        """--version should exit 0."""
+        result = runner.invoke(app, ["--version"])
+        assert result.exit_code == 0
+
+    def test_version_flag_prints_version(self):
+        """--version should print 'siphon' followed by a version string."""
+        result = runner.invoke(app, ["--version"])
+        assert result.exit_code == 0
+        assert "siphon" in result.output
+        # Should contain a version number (digits and dots)
+        import re
+        assert re.search(r"\d+\.\d+\.\d+", result.output)
+
+
+# ---------------------------------------------------------------------------
 # --help
 # ---------------------------------------------------------------------------
 

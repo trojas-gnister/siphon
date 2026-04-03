@@ -10,6 +10,7 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
+from siphon import __version__
 from siphon.config.loader import load_config, validate_config
 from siphon.core.pipeline import Pipeline, PipelineResult
 from siphon.utils.errors import SiphonError
@@ -20,6 +21,26 @@ app = typer.Typer(
     no_args_is_help=True,
 )
 console = Console()
+
+
+def version_callback(value: bool) -> None:
+    if value:
+        console.print(f"siphon {__version__}")
+        raise typer.Exit()
+
+
+@app.callback()
+def main(
+    version: bool = typer.Option(
+        False,
+        "--version",
+        callback=version_callback,
+        is_eager=True,
+        help="Show version and exit.",
+    ),
+) -> None:
+    """Configurable LLM-powered ETL pipeline."""
+    pass
 
 
 @app.command()
