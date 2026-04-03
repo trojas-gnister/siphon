@@ -42,6 +42,16 @@ class Pipeline:
     def __init__(self, config: SiphonConfig) -> None:
         self._config = config
 
+    @staticmethod
+    def _scan_directory(directory: Path) -> list[Path]:
+        """Find all supported spreadsheet files in a directory."""
+        supported_extensions = {".csv", ".xlsx", ".xls", ".ods"}
+        files = []
+        for f in sorted(directory.iterdir()):
+            if f.is_file() and f.suffix.lower() in supported_extensions:
+                files.append(f)
+        return files
+
     async def run(
         self,
         input_path: str | Path,
@@ -54,7 +64,7 @@ class Pipeline:
         """Execute the full pipeline.
 
         Args:
-            input_path: Path to spreadsheet file.
+            input_path: Path to spreadsheet file or directory of spreadsheet files.
             dry_run: If True, extract + validate only, no DB insertion.
             no_review: If True, skip HITL review.
             create_tables: If True, auto-create tables before insertion.
@@ -81,8 +91,28 @@ class Pipeline:
         validator = Validator(self._config)
 
         # 1. Extract
-        logger.info("Extracting data from %s", input_path)
-        records, skipped_chunks = await extractor.extract(input_path)
+        input_path = Path(input_path)
+
+        if input_path.is_dir():
+            files = self._scan_directory(input_path)
+            if not files:
+                logger.warning("No supported files found in %s", input_path)
+                return result
+
+            all_records: list[dict] = []
+            all_skipped: list[dict] = []
+            for file_path in files:
+                logger.info("Processing %s", file_path)
+                file_records, file_skipped = await extractor.extract(file_path)
+                all_records.extend(file_records)
+                all_skipped.extend(file_skipped)
+
+            records = all_records
+            skipped_chunks = all_skipped
+        else:
+            logger.info("Extracting data from %s", input_path)
+            records, skipped_chunks = await extractor.extract(input_path)
+
         result.total_extracted = len(records)
         result.skipped_chunks = skipped_chunks
 
