@@ -1,4 +1,4 @@
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 from siphon.config import load_config, validate_config, SiphonConfig
 from siphon.core.pipeline import Pipeline, PipelineResult
