@@ -328,6 +328,7 @@ class TestRunCommand:
             no_review=True,
             create_tables=True,
             chunk_size=5,
+            sheet=None,
         )
 
 

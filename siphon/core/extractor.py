@@ -31,10 +31,20 @@ class Extractor:
     # Public interface
     # ------------------------------------------------------------------
 
-    def load_spreadsheet(self, path: str | Path) -> pd.DataFrame:
+    def load_spreadsheet(
+        self, path: str | Path, *, sheet: str | int | None = None
+    ) -> pd.DataFrame:
         """Load a spreadsheet file into a DataFrame.
 
         Supports: .csv, .xlsx, .xls, .ods
+
+        Parameters
+        ----------
+        path:
+            Path to the spreadsheet file.
+        sheet:
+            Sheet name or 0-based index for multi-sheet Excel files.
+            Ignored for CSV files. Defaults to the first sheet.
 
         Raises
         ------
@@ -43,15 +53,22 @@ class Extractor:
         """
         path = Path(path)
         ext = path.suffix.lower()
+        sheet_arg = sheet if sheet is not None else 0
         try:
             if ext == ".csv":
                 return pd.read_csv(path, dtype=str).fillna("")
             elif ext == ".xlsx":
-                return pd.read_excel(path, dtype=str, engine="openpyxl").fillna("")
+                return pd.read_excel(
+                    path, dtype=str, engine="openpyxl", sheet_name=sheet_arg
+                ).fillna("")
             elif ext == ".xls":
-                return pd.read_excel(path, dtype=str, engine="xlrd").fillna("")
+                return pd.read_excel(
+                    path, dtype=str, engine="xlrd", sheet_name=sheet_arg
+                ).fillna("")
             elif ext == ".ods":
-                return pd.read_excel(path, dtype=str, engine="odf").fillna("")
+                return pd.read_excel(
+                    path, dtype=str, engine="odf", sheet_name=sheet_arg
+                ).fillna("")
             else:
                 raise ExtractionError(f"Unsupported file format: {ext}")
         except ExtractionError:
@@ -63,8 +80,17 @@ class Extractor:
         """Split *df* into a list of DataFrames each with at most *chunk_size* rows."""
         return [df.iloc[i : i + chunk_size] for i in range(0, len(df), chunk_size)]
 
-    async def extract(self, path: str | Path) -> tuple[list[dict], list[dict]]:
+    async def extract(
+        self, path: str | Path, *, sheet: str | int | None = None
+    ) -> tuple[list[dict], list[dict]]:
         """Full extraction pipeline: load → chunk → extract via LLM concurrently.
+
+        Parameters
+        ----------
+        path:
+            Path to the spreadsheet file.
+        sheet:
+            Sheet name or 0-based index for multi-sheet Excel files.
 
         Returns
         -------
@@ -74,7 +100,7 @@ class Extractor:
             dropped.
         """
         self._skipped_chunks = []
-        df = self.load_spreadsheet(path)
+        df = self.load_spreadsheet(path, sheet=sheet)
         chunk_size = self._config.pipeline.chunk_size
         chunks = self.chunk_dataframe(df, chunk_size)
 

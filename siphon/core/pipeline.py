@@ -8,6 +8,8 @@ from pathlib import Path
 
 from siphon.config.schema import SiphonConfig
 from siphon.core.extractor import Extractor
+from siphon.core.review_cli import ReviewCLI
+from siphon.core.reviewer import ReviewBatch, ReviewStatus
 from siphon.core.validator import Validator
 from siphon.db.engine import DatabaseEngine
 from siphon.db.inserter import Inserter
@@ -60,6 +62,7 @@ class Pipeline:
         no_review: bool = False,
         create_tables: bool = False,
         chunk_size: int | None = None,
+        sheet: str | int | None = None,
     ) -> PipelineResult:
         """Execute the full pipeline.
 
@@ -69,6 +72,7 @@ class Pipeline:
             no_review: If True, skip HITL review.
             create_tables: If True, auto-create tables before insertion.
             chunk_size: Override config chunk_size.
+            sheet: Sheet name or 0-based index for multi-sheet Excel files.
 
         Returns:
             PipelineResult with counts and details.
@@ -103,7 +107,9 @@ class Pipeline:
             all_skipped: list[dict] = []
             for file_path in files:
                 logger.info("Processing %s", file_path)
-                file_records, file_skipped = await extractor.extract(file_path)
+                file_records, file_skipped = await extractor.extract(
+                    file_path, sheet=sheet
+                )
                 all_records.extend(file_records)
                 all_skipped.extend(file_skipped)
 
@@ -111,7 +117,9 @@ class Pipeline:
             skipped_chunks = all_skipped
         else:
             logger.info("Extracting data from %s", input_path)
-            records, skipped_chunks = await extractor.extract(input_path)
+            records, skipped_chunks = await extractor.extract(
+                input_path, sheet=sheet
+            )
 
         result.total_extracted = len(records)
         result.skipped_chunks = skipped_chunks
@@ -196,14 +204,7 @@ class Pipeline:
             logger.warning("No records to insert after deduplication")
             return result
 
-        # 4. Review (placeholder — Task 18-19 will implement ReviewBatch)
-        # For now, if no_review is False and config.pipeline.review is True,
-        # we would run the review. Since ReviewBatch doesn't exist yet,
-        # just proceed to insertion.
-        if not no_review and self._config.pipeline.review:
-            logger.info("Review step requested but not yet implemented — proceeding")
-
-        # 5. Insert
+        # 4. Prepare DB components (needed for both review and insertion)
         db_engine = DatabaseEngine(self._config.database)
         try:
             model_gen = ModelGenerator(self._config)
@@ -213,7 +214,6 @@ class Pipeline:
                 await db_engine.create_tables(model_gen.base)
             else:
                 table_names = list(self._config.schema_.tables.keys())
-                # Also include junction table names
                 for rel in self._config.relationships:
                     if hasattr(rel, "through"):
                         table_names.append(rel.through)
@@ -222,6 +222,26 @@ class Pipeline:
             inserter = Inserter(self._config, db_engine, model_gen)
             await inserter.load_existing_keys()
 
+            # 5. Review (human-in-the-loop)
+            if not no_review and self._config.pipeline.review:
+                batch = ReviewBatch(
+                    records=valid_records,
+                    llm_client=llm_client,
+                    config=self._config,
+                    inserter=inserter,
+                )
+                review_cli = ReviewCLI()
+                batch = await review_cli.run_review(batch)
+
+                if batch.status == ReviewStatus.REJECTED:
+                    logger.info("Batch rejected — no records inserted")
+                    return result
+
+                # Use the (possibly revised) records from the approved batch
+                valid_records = batch.records
+                result.total_valid = len(valid_records)
+
+            # 6. Insert
             result.total_inserted = await inserter.insert(valid_records)
         finally:
             await db_engine.dispose()
