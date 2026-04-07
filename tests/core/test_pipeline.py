@@ -1,41 +1,33 @@
-"""Tests for the Pipeline orchestrator."""
+"""Tests for the v2 Pipeline orchestrator (source loading + mapping)."""
 
 from __future__ import annotations
 
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
 
 import pandas as pd
 import pytest
-from sqlalchemy import text
 
 from siphon.config.schema import SiphonConfig
 from siphon.core.pipeline import Pipeline, PipelineResult
-from siphon.db.engine import DatabaseEngine
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
-_LLM_BLOCK = {
-    "base_url": "https://api.example.com/v1",
-    "model": "gpt-4o-mini",
-    "api_key": "sk-test",
-}
-
 
 def _simple_config(db_url: str = "sqlite+aiosqlite://") -> SiphonConfig:
-    """Single-table config with auto_increment PK."""
+    """Single-table config with auto_increment PK — spreadsheet source."""
     return SiphonConfig.model_validate({
         "name": "test_pipeline",
-        "llm": _LLM_BLOCK,
+        "source": {"type": "spreadsheet"},
         "database": {"url": db_url},
         "schema": {
             "fields": [
                 {
                     "name": "company_name",
                     "type": "string",
+                    "source": "company_name",
                     "required": True,
                     "db": {"table": "companies", "column": "name"},
                 },
@@ -47,7 +39,6 @@ def _simple_config(db_url: str = "sqlite+aiosqlite://") -> SiphonConfig:
             },
         },
         "pipeline": {
-            "chunk_size": 50,
             "review": False,
             "log_level": "warning",
         },
@@ -58,13 +49,14 @@ def _dedup_config(db_url: str = "sqlite+aiosqlite://") -> SiphonConfig:
     """Single-table config with deduplication enabled."""
     return SiphonConfig.model_validate({
         "name": "test_pipeline",
-        "llm": _LLM_BLOCK,
+        "source": {"type": "spreadsheet"},
         "database": {"url": db_url},
         "schema": {
             "fields": [
                 {
                     "name": "company_name",
                     "type": "string",
+                    "source": "company_name",
                     "required": True,
                     "db": {"table": "companies", "column": "name"},
                 },
@@ -80,18 +72,111 @@ def _dedup_config(db_url: str = "sqlite+aiosqlite://") -> SiphonConfig:
             },
         },
         "pipeline": {
-            "chunk_size": 50,
             "review": False,
             "log_level": "warning",
         },
     })
 
 
-def _write_csv(tmp_path: Path, rows: list[dict], filename: str = "data.csv") -> Path:
+def _xml_config(db_url: str = "sqlite+aiosqlite://") -> SiphonConfig:
+    """Single-table config for XML source."""
+    return SiphonConfig.model_validate({
+        "name": "test_xml_pipeline",
+        "source": {
+            "type": "xml",
+            "root": "Companies.Company",
+            "encoding": "utf-8",
+        },
+        "database": {"url": db_url},
+        "schema": {
+            "fields": [
+                {
+                    "name": "company_name",
+                    "type": "string",
+                    "source": "Name",
+                    "required": True,
+                    "db": {"table": "companies", "column": "name"},
+                },
+            ],
+            "tables": {
+                "companies": {
+                    "primary_key": {"column": "id", "type": "auto_increment"},
+                },
+            },
+        },
+        "pipeline": {
+            "review": False,
+            "log_level": "warning",
+        },
+    })
+
+
+def _collection_config(db_url: str = "sqlite+aiosqlite://") -> SiphonConfig:
+    """Config with a collection for nested data expansion."""
+    return SiphonConfig.model_validate({
+        "name": "test_collection_pipeline",
+        "source": {
+            "type": "xml",
+            "root": "Cases.Case",
+            "encoding": "utf-8",
+            "force_list": ["Note"],
+        },
+        "database": {"url": db_url},
+        "schema": {
+            "fields": [
+                {
+                    "name": "case_code",
+                    "type": "string",
+                    "source": "Code",
+                    "required": True,
+                    "db": {"table": "cases", "column": "code"},
+                },
+            ],
+            "collections": [
+                {
+                    "name": "notes",
+                    "source_path": "Notes.Note",
+                    "fields": [
+                        {
+                            "name": "note_text",
+                            "type": "string",
+                            "source": "Text",
+                            "required": True,
+                            "db": {"table": "case_notes", "column": "text"},
+                        },
+                    ],
+                },
+            ],
+            "tables": {
+                "cases": {
+                    "primary_key": {"column": "id", "type": "auto_increment"},
+                },
+                "case_notes": {
+                    "primary_key": {"column": "id", "type": "auto_increment"},
+                },
+            },
+        },
+        "pipeline": {
+            "review": False,
+            "log_level": "warning",
+        },
+    })
+
+
+def _write_csv(
+    tmp_path: Path, rows: list[dict], filename: str = "data.csv"
+) -> Path:
     """Write a list-of-dicts as a CSV file and return the path."""
     df = pd.DataFrame(rows)
     p = tmp_path / filename
     df.to_csv(p, index=False)
+    return p
+
+
+def _write_xml(tmp_path: Path, xml_content: str, filename: str = "data.xml") -> Path:
+    """Write XML content to a file and return the path."""
+    p = tmp_path / filename
+    p.write_text(xml_content, encoding="utf-8")
     return p
 
 
@@ -128,31 +213,88 @@ class TestPipelineResultDefaults:
 
 
 # ---------------------------------------------------------------------------
-# dry_run: extract + validate but no DB insertion
+# Spreadsheet source: load CSV -> map -> validate -> insert
 # ---------------------------------------------------------------------------
 
 
-class TestDryRun:
-    async def test_dry_run_skips_insertion(self, tmp_path: Path):
-        """dry_run=True extracts and validates but does not insert into the DB."""
+class TestSpreadsheetSource:
+    async def test_csv_load_map_validate_insert(self, tmp_path: Path):
+        """CSV records are loaded, mapped, validated, and inserted."""
         config = _simple_config()
         csv_path = _write_csv(tmp_path, [
             {"company_name": "Acme"},
             {"company_name": "Beta"},
         ])
 
-        extracted_records = [
+        pipeline = Pipeline(config)
+        result = await pipeline.run(csv_path, create_tables=True)
+
+        assert result.total_extracted == 2
+        assert result.total_valid == 2
+        assert result.total_inserted == 2
+
+    async def test_csv_with_mixed_valid_invalid(self, tmp_path: Path):
+        """Pipeline correctly separates valid from invalid records."""
+        config = _simple_config()
+        csv_path = _write_csv(tmp_path, [
+            {"company_name": "Valid"},
+            {"company_name": ""},
+            {"company_name": "Also Valid"},
+        ])
+
+        pipeline = Pipeline(config)
+        result = await pipeline.run(csv_path, create_tables=True)
+
+        assert result.total_extracted == 3
+        assert result.total_valid == 2
+        assert result.total_invalid == 1
+        assert result.total_inserted == 2
+
+
+# ---------------------------------------------------------------------------
+# XML source: load XML -> map -> validate -> insert
+# ---------------------------------------------------------------------------
+
+
+class TestXMLSource:
+    async def test_xml_load_map_validate_insert(self, tmp_path: Path):
+        """XML records are loaded, mapped, validated, and inserted."""
+        config = _xml_config()
+        xml_content = """<?xml version="1.0" encoding="UTF-8"?>
+<Companies>
+    <Company>
+        <Name>Acme Corp</Name>
+    </Company>
+    <Company>
+        <Name>Globex Inc</Name>
+    </Company>
+</Companies>"""
+        xml_path = _write_xml(tmp_path, xml_content)
+
+        pipeline = Pipeline(config)
+        result = await pipeline.run(xml_path, create_tables=True)
+
+        assert result.total_extracted == 2
+        assert result.total_valid == 2
+        assert result.total_inserted == 2
+
+
+# ---------------------------------------------------------------------------
+# Dry run: load + map + validate but no DB insertion
+# ---------------------------------------------------------------------------
+
+
+class TestDryRun:
+    async def test_dry_run_skips_insertion(self, tmp_path: Path):
+        """dry_run=True loads, maps, and validates but does not insert."""
+        config = _simple_config()
+        csv_path = _write_csv(tmp_path, [
             {"company_name": "Acme"},
             {"company_name": "Beta"},
-        ]
+        ])
 
-        with patch("siphon.core.pipeline.LLMClient") as MockLLM:
-            mock_llm_instance = MagicMock()
-            mock_llm_instance.extract_json = AsyncMock(return_value=extracted_records)
-            MockLLM.return_value = mock_llm_instance
-
-            pipeline = Pipeline(config)
-            result = await pipeline.run(csv_path, dry_run=True)
+        pipeline = Pipeline(config)
+        result = await pipeline.run(csv_path, dry_run=True)
 
         assert result.dry_run is True
         assert result.total_extracted == 2
@@ -160,26 +302,15 @@ class TestDryRun:
         assert result.total_inserted == 0
 
     async def test_dry_run_still_validates(self, tmp_path: Path):
-        """dry_run captures invalid records even though no DB operations happen."""
+        """dry_run captures invalid records even without DB operations."""
         config = _simple_config()
         csv_path = _write_csv(tmp_path, [
             {"company_name": "Acme"},
             {"company_name": ""},
         ])
 
-        # Return records including one with empty company_name (required field)
-        extracted_records = [
-            {"company_name": "Acme"},
-            {"company_name": ""},
-        ]
-
-        with patch("siphon.core.pipeline.LLMClient") as MockLLM:
-            mock_llm_instance = MagicMock()
-            mock_llm_instance.extract_json = AsyncMock(return_value=extracted_records)
-            MockLLM.return_value = mock_llm_instance
-
-            pipeline = Pipeline(config)
-            result = await pipeline.run(csv_path, dry_run=True)
+        pipeline = Pipeline(config)
+        result = await pipeline.run(csv_path, dry_run=True)
 
         assert result.dry_run is True
         assert result.total_extracted == 2
@@ -197,19 +328,8 @@ class TestDryRun:
             {"company_name": "Beta"},
         ])
 
-        extracted_records = [
-            {"company_name": "Acme"},
-            {"company_name": "Acme"},
-            {"company_name": "Beta"},
-        ]
-
-        with patch("siphon.core.pipeline.LLMClient") as MockLLM:
-            mock_llm_instance = MagicMock()
-            mock_llm_instance.extract_json = AsyncMock(return_value=extracted_records)
-            MockLLM.return_value = mock_llm_instance
-
-            pipeline = Pipeline(config)
-            result = await pipeline.run(csv_path, dry_run=True)
+        pipeline = Pipeline(config)
+        result = await pipeline.run(csv_path, dry_run=True)
 
         assert result.total_extracted == 3
         assert result.total_valid == 3
@@ -218,53 +338,7 @@ class TestDryRun:
 
 
 # ---------------------------------------------------------------------------
-# no_review: skips review step
-# ---------------------------------------------------------------------------
-
-
-class TestNoReview:
-    async def test_no_review_proceeds_to_insert(self, tmp_path: Path):
-        """no_review=True skips review and proceeds directly to insertion."""
-        config = _simple_config()
-        # Enable review in config to ensure no_review flag overrides it
-        config.pipeline.review = True
-
-        csv_path = _write_csv(tmp_path, [{"company_name": "Acme"}])
-        extracted_records = [{"company_name": "Acme"}]
-
-        with patch("siphon.core.pipeline.LLMClient") as MockLLM:
-            mock_llm_instance = MagicMock()
-            mock_llm_instance.extract_json = AsyncMock(return_value=extracted_records)
-            MockLLM.return_value = mock_llm_instance
-
-            pipeline = Pipeline(config)
-            result = await pipeline.run(
-                csv_path, no_review=True, create_tables=True
-            )
-
-        assert result.total_extracted == 1
-        assert result.total_valid == 1
-        assert result.total_inserted == 1
-
-    async def test_default_no_review_false_still_inserts(self, tmp_path: Path):
-        """When review is not configured and no_review is False, pipeline still works."""
-        config = _simple_config()
-        csv_path = _write_csv(tmp_path, [{"company_name": "Acme"}])
-        extracted_records = [{"company_name": "Acme"}]
-
-        with patch("siphon.core.pipeline.LLMClient") as MockLLM:
-            mock_llm_instance = MagicMock()
-            mock_llm_instance.extract_json = AsyncMock(return_value=extracted_records)
-            MockLLM.return_value = mock_llm_instance
-
-            pipeline = Pipeline(config)
-            result = await pipeline.run(csv_path, create_tables=True)
-
-        assert result.total_inserted == 1
-
-
-# ---------------------------------------------------------------------------
-# create_tables: tables are created and data inserted
+# Create tables: tables are created and data inserted
 # ---------------------------------------------------------------------------
 
 
@@ -276,39 +350,24 @@ class TestCreateTables:
             {"company_name": "Acme"},
             {"company_name": "Beta"},
         ])
-        extracted_records = [
-            {"company_name": "Acme"},
-            {"company_name": "Beta"},
-        ]
 
-        with patch("siphon.core.pipeline.LLMClient") as MockLLM:
-            mock_llm_instance = MagicMock()
-            mock_llm_instance.extract_json = AsyncMock(return_value=extracted_records)
-            MockLLM.return_value = mock_llm_instance
-
-            pipeline = Pipeline(config)
-            result = await pipeline.run(csv_path, create_tables=True)
+        pipeline = Pipeline(config)
+        result = await pipeline.run(csv_path, create_tables=True)
 
         assert result.total_extracted == 2
         assert result.total_valid == 2
         assert result.total_inserted == 2
 
     async def test_verify_tables_called_when_no_create(self, tmp_path: Path):
-        """Without create_tables, verify_tables is called and raises if tables missing."""
+        """Without create_tables, verify_tables raises if tables are missing."""
         config = _simple_config()
         csv_path = _write_csv(tmp_path, [{"company_name": "Acme"}])
-        extracted_records = [{"company_name": "Acme"}]
 
-        with patch("siphon.core.pipeline.LLMClient") as MockLLM:
-            mock_llm_instance = MagicMock()
-            mock_llm_instance.extract_json = AsyncMock(return_value=extracted_records)
-            MockLLM.return_value = mock_llm_instance
+        pipeline = Pipeline(config)
+        from siphon.utils.errors import DatabaseError
 
-            pipeline = Pipeline(config)
-            # Without create_tables, verify_tables will fail because tables don't exist
-            from siphon.utils.errors import DatabaseError
-            with pytest.raises(DatabaseError, match="Missing tables"):
-                await pipeline.run(csv_path, create_tables=False)
+        with pytest.raises(DatabaseError, match="Missing tables"):
+            await pipeline.run(csv_path, create_tables=False)
 
 
 # ---------------------------------------------------------------------------
@@ -327,20 +386,8 @@ class TestResultCounts:
             {"company_name": ""},      # invalid (required)
         ])
 
-        extracted_records = [
-            {"company_name": "Acme"},
-            {"company_name": "Beta"},
-            {"company_name": "Acme"},  # duplicate
-            {"company_name": ""},      # invalid
-        ]
-
-        with patch("siphon.core.pipeline.LLMClient") as MockLLM:
-            mock_llm_instance = MagicMock()
-            mock_llm_instance.extract_json = AsyncMock(return_value=extracted_records)
-            MockLLM.return_value = mock_llm_instance
-
-            pipeline = Pipeline(config)
-            result = await pipeline.run(csv_path, create_tables=True)
+        pipeline = Pipeline(config)
+        result = await pipeline.run(csv_path, create_tables=True)
 
         assert result.total_extracted == 4
         assert result.total_valid == 3     # Acme, Beta, Acme pass validation
@@ -348,157 +395,139 @@ class TestResultCounts:
         assert result.total_duplicates == 1  # second Acme
         assert result.total_inserted == 2  # Acme + Beta
 
-    async def test_zero_records_extracted(self, tmp_path: Path):
-        """When extraction returns no records, counts reflect that."""
+    async def test_zero_records_loaded(self, tmp_path: Path):
+        """When source file has no data rows, counts reflect that."""
         config = _simple_config()
-        csv_path = _write_csv(tmp_path, [{"company_name": "X"}])
+        # Write CSV with headers only (no data rows)
+        p = tmp_path / "empty.csv"
+        p.write_text("company_name\n")
 
-        with patch("siphon.core.pipeline.LLMClient") as MockLLM:
-            mock_llm_instance = MagicMock()
-            mock_llm_instance.extract_json = AsyncMock(return_value=[])
-            MockLLM.return_value = mock_llm_instance
-
-            # The extractor will see 1 row but LLM returns 0 records -> mismatch,
-            # then retry also returns 0 -> skip chunk. Records will be empty.
-            # Actually, we need both calls to return empty for the skip to happen.
-            mock_llm_instance.extract_json = AsyncMock(
-                side_effect=[[], []]
-            )
-
-            pipeline = Pipeline(config)
-            result = await pipeline.run(csv_path, dry_run=True)
+        pipeline = Pipeline(config)
+        result = await pipeline.run(p, dry_run=True)
 
         assert result.total_extracted == 0
         assert result.total_valid == 0
         assert result.total_inserted == 0
 
     async def test_all_records_invalid(self, tmp_path: Path):
-        """When all extracted records fail validation, nothing is inserted."""
+        """When all records fail validation, nothing is inserted."""
         config = _simple_config()
         csv_path = _write_csv(tmp_path, [
             {"company_name": ""},
             {"company_name": ""},
         ])
 
-        # Return records with empty required field
-        extracted_records = [
-            {"company_name": ""},
-            {"company_name": ""},
-        ]
-
-        with patch("siphon.core.pipeline.LLMClient") as MockLLM:
-            mock_llm_instance = MagicMock()
-            mock_llm_instance.extract_json = AsyncMock(return_value=extracted_records)
-            MockLLM.return_value = mock_llm_instance
-
-            pipeline = Pipeline(config)
-            result = await pipeline.run(csv_path, create_tables=True)
+        pipeline = Pipeline(config)
+        result = await pipeline.run(csv_path, create_tables=True)
 
         assert result.total_extracted == 2
         assert result.total_valid == 0
         assert result.total_invalid == 2
         assert result.total_inserted == 0
 
-    async def test_skipped_chunks_tracked(self, tmp_path: Path):
-        """Skipped chunks from extraction are captured in the result."""
+
+# ---------------------------------------------------------------------------
+# Directory input: multiple CSVs aggregated
+# ---------------------------------------------------------------------------
+
+
+class TestDirectoryInput:
+    async def test_multiple_csvs_aggregated(self, tmp_path: Path):
+        """Multiple CSV files in a directory are loaded and aggregated."""
         config = _simple_config()
-        config.pipeline.chunk_size = 1
-        csv_path = _write_csv(tmp_path, [
-            {"company_name": "Acme"},
-            {"company_name": "Beta"},
-        ])
+        _write_csv(tmp_path, [{"company_name": "Acme"}], "a.csv")
+        _write_csv(tmp_path, [{"company_name": "Beta"}], "b.csv")
 
-        from siphon.utils.errors import ExtractionError
+        pipeline = Pipeline(config)
+        result = await pipeline.run(tmp_path, create_tables=True)
 
-        with patch("siphon.core.pipeline.LLMClient") as MockLLM:
-            mock_llm_instance = MagicMock()
-            # First chunk succeeds, second chunk fails (both attempts)
-            mock_llm_instance.extract_json = AsyncMock(
-                side_effect=[
-                    [{"company_name": "Acme"}],       # chunk 0
-                    ExtractionError("LLM timeout"),    # chunk 1
-                ]
-            )
-            MockLLM.return_value = mock_llm_instance
+        assert result.total_extracted == 2
+        assert result.total_valid == 2
+        assert result.total_inserted == 2
 
-            pipeline = Pipeline(config)
-            result = await pipeline.run(csv_path, create_tables=True)
+    async def test_empty_directory(self, tmp_path: Path):
+        """Empty directory returns early with zero counts."""
+        config = _simple_config()
+        empty_dir = tmp_path / "empty"
+        empty_dir.mkdir()
 
+        pipeline = Pipeline(config)
+        result = await pipeline.run(empty_dir, dry_run=True)
+
+        assert result.total_extracted == 0
+        assert result.total_valid == 0
+        assert result.total_inserted == 0
+
+
+# ---------------------------------------------------------------------------
+# Collections: nested data expanded into separate table rows
+# ---------------------------------------------------------------------------
+
+
+class TestCollections:
+    async def test_collections_mapped(self, tmp_path: Path):
+        """Collections from XML are expanded into collection records."""
+        config = _collection_config()
+        xml_content = """<?xml version="1.0" encoding="UTF-8"?>
+<Cases>
+    <Case>
+        <Code>CASE-001</Code>
+        <Notes>
+            <Note>
+                <Text>First note</Text>
+            </Note>
+            <Note>
+                <Text>Second note</Text>
+            </Note>
+        </Notes>
+    </Case>
+</Cases>"""
+        xml_path = _write_xml(tmp_path, xml_content)
+
+        pipeline = Pipeline(config)
+        result = await pipeline.run(xml_path, create_tables=True)
+
+        # Main records
         assert result.total_extracted == 1
-        assert len(result.skipped_chunks) == 1
+        assert result.total_valid == 1
         assert result.total_inserted == 1
 
 
 # ---------------------------------------------------------------------------
-# chunk_size override
+# No review by default: pipeline skips review when config.pipeline.review=False
 # ---------------------------------------------------------------------------
 
 
-class TestChunkSizeOverride:
-    async def test_chunk_size_override(self, tmp_path: Path):
-        """chunk_size parameter overrides the config value."""
+class TestNoReview:
+    async def test_review_false_skips_review(self, tmp_path: Path):
+        """When review=False in config, pipeline skips review and inserts."""
         config = _simple_config()
-        assert config.pipeline.chunk_size == 50  # default from config
+        assert config.pipeline.review is False
 
-        csv_path = _write_csv(tmp_path, [
-            {"company_name": "A"},
-            {"company_name": "B"},
-            {"company_name": "C"},
-        ])
+        csv_path = _write_csv(tmp_path, [{"company_name": "Acme"}])
 
-        call_count = 0
+        pipeline = Pipeline(config)
+        result = await pipeline.run(csv_path, create_tables=True)
 
-        async def _fake_extract_json(prompt: str) -> list[dict]:
-            nonlocal call_count
-            call_count += 1
-            # With chunk_size=1, each chunk has 1 row
-            if call_count == 1:
-                return [{"company_name": "A"}]
-            elif call_count == 2:
-                return [{"company_name": "B"}]
-            else:
-                return [{"company_name": "C"}]
+        assert result.total_extracted == 1
+        assert result.total_valid == 1
+        assert result.total_inserted == 1
 
-        with patch("siphon.core.pipeline.LLMClient") as MockLLM:
-            mock_llm_instance = MagicMock()
-            mock_llm_instance.extract_json = _fake_extract_json
-            MockLLM.return_value = mock_llm_instance
-
-            pipeline = Pipeline(config)
-            result = await pipeline.run(
-                csv_path, dry_run=True, chunk_size=1
-            )
-
-        # With chunk_size=1 and 3 rows, should have 3 chunks -> 3 LLM calls
-        assert call_count == 3
-        assert result.total_extracted == 3
-
-    async def test_default_chunk_size_used(self, tmp_path: Path):
-        """Without chunk_size override, config value is used."""
+    async def test_no_review_flag_overrides_config(self, tmp_path: Path):
+        """no_review=True skips review even when config.pipeline.review=True."""
         config = _simple_config()
-        config.pipeline.chunk_size = 50
+        config.pipeline.review = True
 
-        csv_path = _write_csv(tmp_path, [
-            {"company_name": "A"},
-            {"company_name": "B"},
-        ])
+        csv_path = _write_csv(tmp_path, [{"company_name": "Acme"}])
 
-        extracted_records = [
-            {"company_name": "A"},
-            {"company_name": "B"},
-        ]
+        pipeline = Pipeline(config)
+        result = await pipeline.run(
+            csv_path, no_review=True, create_tables=True
+        )
 
-        with patch("siphon.core.pipeline.LLMClient") as MockLLM:
-            mock_llm_instance = MagicMock()
-            mock_llm_instance.extract_json = AsyncMock(return_value=extracted_records)
-            MockLLM.return_value = mock_llm_instance
-
-            pipeline = Pipeline(config)
-            result = await pipeline.run(csv_path, dry_run=True)
-
-        # With chunk_size=50 and 2 rows, only 1 LLM call
-        mock_llm_instance.extract_json.assert_called_once()
-        assert result.total_extracted == 2
+        assert result.total_extracted == 1
+        assert result.total_valid == 1
+        assert result.total_inserted == 1
 
 
 # ---------------------------------------------------------------------------
@@ -507,56 +536,33 @@ class TestChunkSizeOverride:
 
 
 class TestDataInDB:
-    async def test_inserted_data_readable_from_db(self, tmp_path: Path):
-        """After a pipeline run with create_tables, data is in the database."""
-        config = _simple_config()
+    async def test_persistent_db_data(self, tmp_path: Path):
+        """After a pipeline run with a file-based DB, data is persisted."""
+        db_path = tmp_path / "test.db"
+        db_url = f"sqlite+aiosqlite:///{db_path}"
+        config = _simple_config(db_url)
         csv_path = _write_csv(tmp_path, [
             {"company_name": "Acme Corp"},
             {"company_name": "Globex Inc"},
         ])
-        extracted_records = [
-            {"company_name": "Acme Corp"},
-            {"company_name": "Globex Inc"},
-        ]
 
-        with patch("siphon.core.pipeline.LLMClient") as MockLLM:
-            mock_llm_instance = MagicMock()
-            mock_llm_instance.extract_json = AsyncMock(return_value=extracted_records)
-            MockLLM.return_value = mock_llm_instance
-
-            pipeline = Pipeline(config)
-            result = await pipeline.run(csv_path, create_tables=True)
+        pipeline = Pipeline(config)
+        result = await pipeline.run(csv_path, create_tables=True)
 
         assert result.total_inserted == 2
 
-        # Verify data is actually in the DB by connecting independently.
-        # Since we used in-memory SQLite, the data is gone after engine dispose.
-        # This test validates that the pipeline reported the correct insertion count.
-        # For a persistent DB test, see integration tests (Task 17).
+        # Verify data by querying the DB independently
+        from sqlalchemy import text
+        from siphon.db.engine import DatabaseEngine
 
-    async def test_pipeline_with_invalid_and_valid_records(self, tmp_path: Path):
-        """Pipeline correctly separates valid from invalid and only inserts valid."""
-        config = _simple_config()
-        csv_path = _write_csv(tmp_path, [
-            {"company_name": "Valid"},
-            {"company_name": ""},
-            {"company_name": "Also Valid"},
-        ])
-        extracted_records = [
-            {"company_name": "Valid"},
-            {"company_name": ""},         # fails required validation
-            {"company_name": "Also Valid"},
-        ]
+        engine = DatabaseEngine(config.database)
+        try:
+            async with engine.session() as session:
+                rows = await session.execute(
+                    text("SELECT name FROM companies ORDER BY name")
+                )
+                names = [row[0] for row in rows.fetchall()]
+        finally:
+            await engine.dispose()
 
-        with patch("siphon.core.pipeline.LLMClient") as MockLLM:
-            mock_llm_instance = MagicMock()
-            mock_llm_instance.extract_json = AsyncMock(return_value=extracted_records)
-            MockLLM.return_value = mock_llm_instance
-
-            pipeline = Pipeline(config)
-            result = await pipeline.run(csv_path, create_tables=True)
-
-        assert result.total_extracted == 3
-        assert result.total_valid == 2
-        assert result.total_invalid == 1
-        assert result.total_inserted == 2
+        assert names == ["Acme Corp", "Globex Inc"]
