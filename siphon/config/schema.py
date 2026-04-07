@@ -2,9 +2,26 @@
 
 from __future__ import annotations
 
-from typing import Annotated, Literal, Union
+from typing import Annotated, Any, Literal, Union
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+
+# ---------------------------------------------------------------------------
+# Deprecated — kept as stub so existing v1 modules don't break at import time.
+# Will be removed in a later task when all dependents are updated.
+# ---------------------------------------------------------------------------
+
+
+class LLMConfig(BaseModel):
+    """DEPRECATED: Configuration for the LLM provider. Retained as import stub."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    base_url: str = ""
+    model: str = ""
+    api_key: str = ""
+    extraction_hints: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -12,15 +29,15 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 # ---------------------------------------------------------------------------
 
 
-class LLMConfig(BaseModel):
-    """Configuration for the LLM provider."""
+class SourceConfig(BaseModel):
+    """Source data configuration."""
 
     model_config = ConfigDict(populate_by_name=True)
 
-    base_url: str
-    model: str
-    api_key: str = ""
-    extraction_hints: str | None = None
+    type: Literal["spreadsheet", "xml", "json"]
+    root: str | None = None  # For XML/JSON: dot-path to record list
+    encoding: str = "utf-8"  # For XML
+    force_list: list[str] | None = None  # For XML: elements to force as lists
 
 
 class DatabaseConfig(BaseModel):
@@ -47,13 +64,34 @@ FieldType = Literal[
 ]
 
 
+class TransformFieldConfig(BaseModel):
+    """Inline transform definition on a field."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    type: str  # template, map, concat, uuid, now, coalesce, custom
+    template: str | None = None  # For template
+    values: dict[str, Any] | None = None  # For map
+    default: Any | None = None  # For map
+    fields: list[str] | None = None  # For concat/coalesce: source field names
+    separator: str = " "  # For concat
+    function: str | None = None  # For custom: function name
+    args: list[str] | None = None  # For custom: source field names as positional args
+    format: str | None = None  # For now: strftime format
+    fallback: TransformFieldConfig | None = None  # For coalesce
+
+
 class FieldConfig(BaseModel):
-    """Definition of a single input field."""
+    """Definition of a single field."""
 
     model_config = ConfigDict(populate_by_name=True)
 
     name: str
-    type: FieldType
+    type: FieldType | None = None  # Optional — not all fields need type formatting
+    source: str | None = None  # Source column/field name to read from
+    aliases: list[str] | None = None  # Alternative source column names
+    transform: TransformFieldConfig | None = None  # Inline transform
+    value: Any | None = None  # Constant value (str, int, bool, etc.)
     db: FieldDBConfig
     required: bool = False
 
@@ -94,6 +132,16 @@ class FieldConfig(BaseModel):
         return self
 
 
+class CollectionConfig(BaseModel):
+    """A nested collection that expands into separate table rows."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    name: str
+    source_path: str  # Dot-path within source record (e.g., "CaseNotes.CaseNote")
+    fields: list[FieldConfig]  # Fields mapped from each collection item
+
+
 class PrimaryKeyConfig(BaseModel):
     """Primary key definition for a table."""
 
@@ -119,6 +167,14 @@ class DeduplicationConfig(BaseModel):
     key: list[str]
     check_db: bool = False
     match: Literal["exact", "case_insensitive"] = "exact"
+
+
+class TransformFileConfig(BaseModel):
+    """Reference to a custom Python transform file."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    file: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -175,6 +231,7 @@ class SchemaConfig(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
     fields: list[FieldConfig]
+    collections: list[CollectionConfig] | None = None
     tables: dict[str, TableConfig]
     deduplication: DeduplicationConfig | None = None
 
@@ -206,12 +263,14 @@ class SiphonConfig(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
     name: str
-    llm: LLMConfig
+    source: SourceConfig
     database: DatabaseConfig
 
     # 'schema' is a Python built-in — alias maps the YAML key to schema_
     schema_: SchemaConfig = Field(alias="schema")
 
+    transforms: TransformFileConfig | None = None
+    variables: dict[str, Any] | None = None
     relationships: list[Relationship] = []
     pipeline: PipelineConfig = Field(default_factory=PipelineConfig)
 
@@ -228,6 +287,18 @@ class SiphonConfig(BaseModel):
                     f"field '{field.name}' references unknown table '{field.db.table}'; "
                     f"known tables: {sorted(known_tables)}"
                 )
+
+        # Validate collection field table references and gather collection field names
+        if self.schema_.collections:
+            for collection in self.schema_.collections:
+                for field in collection.fields:
+                    if field.db.table not in known_tables:
+                        raise ValueError(
+                            f"collection '{collection.name}' field '{field.name}' "
+                            f"references unknown table '{field.db.table}'; "
+                            f"known tables: {sorted(known_tables)}"
+                        )
+                    known_field_names.add(field.name)
 
         # Validate relationship table references
         for rel in self.relationships:
