@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Rewrite Siphon to replace LLM-based extraction with explicit column mapping + a pluggable transform system, and add XML source support — enabling it to replace both company_uploader AND workshield_importer.
+**Goal:** Rewrite Siphon to replace LLM-based extraction with explicit column mapping + a pluggable transform system, and add XML source support — enabling it to replace both the company uploader and the incident importer.
 
 **Architecture:** Source loaders read data (CSV/XLSX/XML). A mapper applies explicit field mappings and transforms. Records flow through the existing validate → dedup → review → insert pipeline unchanged. Complex domain logic lives in Python transform files referenced from YAML config.
 
@@ -195,7 +195,7 @@ pipeline:
   log_level: info
 ```
 
-### Incident import (replaces workshield_importer)
+### Incident import (replaces incident importer)
 
 ```yaml
 name: "navex-incident-import"
@@ -214,7 +214,7 @@ variables:                           # Reusable values for templates
   company_id: 437
   harassment_type_id: 14
   attachments_prefix: "MFRM_IMPORT"
-  s3_url_prefix: "https://workshield-local.s3.amazonaws.com"
+  s3_url_prefix: "https://example-bucket.s3.amazonaws.com"
 
 database:
   url: "mysql+aiomysql://${DB_USER}:${DB_PASS}@${DB_HOST}/${DB_NAME}"
