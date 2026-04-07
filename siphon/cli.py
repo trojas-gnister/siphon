@@ -17,7 +17,7 @@ from siphon.utils.errors import SiphonError
 
 app = typer.Typer(
     name="siphon",
-    help="Configurable LLM-powered ETL pipeline",
+    help="Configurable ETL pipeline",
     no_args_is_help=True,
 )
 console = Console()
@@ -39,7 +39,7 @@ def main(
         help="Show version and exit.",
     ),
 ) -> None:
-    """Configurable LLM-powered ETL pipeline."""
+    """Configurable ETL pipeline."""
     pass
 
 
@@ -50,7 +50,6 @@ def run(
     create_tables: bool = typer.Option(False, "--create-tables", help="Auto-create tables if they don't exist"),
     dry_run: bool = typer.Option(False, "--dry-run", help="Extract + validate only, no DB insertion"),
     no_review: bool = typer.Option(False, "--no-review", help="Skip HITL review, insert directly"),
-    chunk_size: Optional[int] = typer.Option(None, "--chunk-size", help="Override chunk size from config"),
     sheet: Optional[str] = typer.Option(None, "--sheet", help="Sheet name or index for multi-sheet Excel"),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Set log level to debug"),
     quiet: bool = typer.Option(False, "--quiet", "-q", help="Set log level to error only"),
@@ -72,7 +71,6 @@ def run(
                 dry_run=dry_run,
                 no_review=no_review,
                 create_tables=create_tables,
-                chunk_size=chunk_size,
                 sheet=sheet,
             )
         )
@@ -104,22 +102,21 @@ def validate(
 
 INIT_TEMPLATE = '''# Siphon ETL Pipeline Configuration
 # ===================================
-# This file configures the Siphon data pipeline.
-# Uncomment and modify sections as needed.
 
 name: "my-pipeline"
 
-# LLM Configuration
-# -----------------
-# Siphon uses any OpenAI-compatible API for data extraction.
-# Works with: OpenAI, Ollama, vLLM, LM Studio
-llm:
-  base_url: "http://localhost:11434/v1"  # Ollama default
-  model: "llama3"
-  api_key: ""  # Required for OpenAI, optional for local models
-  # extraction_hints: |
-  #   Optional domain-specific instructions for the LLM.
-  #   Example: "If company name is missing, use city name instead."
+# Source Configuration
+# --------------------
+# Supported types: spreadsheet (CSV/XLSX/XLS/ODS), xml, json
+source:
+  type: spreadsheet
+  # For XML/JSON sources:
+  # type: xml
+  # root: "Records.Record"    # Dot-path to record list
+  # encoding: utf-8           # utf-8 or utf-16-le
+  # force_list:               # Elements always parsed as lists
+  #   - Item
+  #   - Note
 
 # Database Configuration
 # ----------------------
@@ -131,12 +128,23 @@ llm:
 database:
   url: "${DATABASE_URL}"  # Environment variable substitution supported
 
+# Variables (reusable values for templates and constants)
+# variables:
+#   reference_prefix: "IMPORT"
+#   user_id: 1
+
+# Custom Transforms (Python file with transform functions)
+# transforms:
+#   file: ./my_transforms.py
+
 # Schema Definition
 # -----------------
 schema:
   fields:
-    # String field (strips whitespace)
+    # String field with source column mapping
     - name: company_name
+      source: "Company Name"
+      aliases: ["Corp Name", "Business", "Entity"]
       type: string
       required: true
       min_length: 2
@@ -145,8 +153,40 @@ schema:
         table: companies
         column: name
 
+    # Field with constant value
+    # - name: is_imported
+    #   value: true
+    #   type: boolean
+    #   db:
+    #     table: companies
+    #     column: is_imported
+
+    # Field with template transform
+    # - name: reference_id
+    #   source: case_code
+    #   transform:
+    #     type: template
+    #     template: "{reference_prefix}-{value}"
+    #   db:
+    #     table: records
+    #     column: reference_id
+
+    # Field with map transform
+    # - name: status_id
+    #   source: status
+    #   transform:
+    #     type: map
+    #     values:
+    #       Active: 1
+    #       Closed: 2
+    #     default: 0
+    #   db:
+    #     table: records
+    #     column: status_id
+
     # Phone field (formats as US phone number)
     # - name: phone
+    #   source: "Phone Number"
     #   type: phone
     #   db:
     #     table: companies
@@ -154,6 +194,7 @@ schema:
 
     # URL field (prepends http:// if missing)
     # - name: website
+    #   source: "Website"
     #   type: url
     #   db:
     #     table: companies
@@ -161,6 +202,7 @@ schema:
 
     # Email field (lowercased)
     # - name: email
+    #   source: "Email"
     #   type: email
     #   db:
     #     table: companies
@@ -168,6 +210,7 @@ schema:
 
     # Integer field
     # - name: employee_count
+    #   source: "Employees"
     #   type: integer
     #   min: 0
     #   max: 1000000
@@ -177,6 +220,7 @@ schema:
 
     # Number (float) field
     # - name: revenue
+    #   source: "Revenue"
     #   type: number
     #   db:
     #     table: companies
@@ -184,6 +228,7 @@ schema:
 
     # Currency field (strips $, commas; returns Decimal)
     # - name: annual_revenue
+    #   source: "Annual Revenue"
     #   type: currency
     #   db:
     #     table: companies
@@ -191,6 +236,7 @@ schema:
 
     # Date field (flexible input, configurable output format)
     # - name: founded_date
+    #   source: "Founded"
     #   type: date
     #   format: "%Y-%m-%d"
     #   db:
@@ -199,6 +245,7 @@ schema:
 
     # Datetime field
     # - name: last_updated
+    #   source: "Last Updated"
     #   type: datetime
     #   format: "%Y-%m-%dT%H:%M:%S"
     #   db:
@@ -207,6 +254,7 @@ schema:
 
     # Enum field (with explicit values)
     # - name: status
+    #   source: "Status"
     #   type: enum
     #   values: [active, inactive, pending]
     #   case: upper  # upper | lower | preserve
@@ -216,6 +264,7 @@ schema:
 
     # Enum field (with preset -- US states via pycountry)
     # - name: state
+    #   source: "State"
     #   type: enum
     #   preset: us_states
     #   db:
@@ -224,6 +273,7 @@ schema:
 
     # Boolean field (detects yes/no/true/false/1/0)
     # - name: is_active
+    #   source: "Active"
     #   type: boolean
     #   db:
     #     table: companies
@@ -231,6 +281,7 @@ schema:
 
     # Regex field (validates against pattern)
     # - name: tax_id
+    #   source: "Tax ID"
     #   type: regex
     #   pattern: "^\\\\d{2}-\\\\d{7}$"
     #   db:
@@ -239,6 +290,7 @@ schema:
 
     # Subdivision field (ISO 3166-2 subdivision codes)
     # - name: province
+    #   source: "Province"
     #   type: subdivision
     #   country_code: CA  # ISO 3166-1 alpha-2 country code
     #   db:
@@ -247,6 +299,7 @@ schema:
 
     # Country field (ISO 3166-1 alpha-2 country codes)
     # - name: country
+    #   source: "Country"
     #   type: country
     #   db:
     #     table: addresses
@@ -263,6 +316,18 @@ schema:
   #   key: [company_name]       # Fields to match on
   #   check_db: true            # Also check existing DB rows
   #   match: case_insensitive   # exact | case_insensitive
+
+  # Collections (for nested XML/JSON data)
+  # collections:
+  #   - name: notes
+  #     source_path: "Notes.Note"
+  #     fields:
+  #       - name: note_text
+  #         source: Text
+  #         type: string
+  #         db:
+  #           table: notes
+  #           column: content
 
 # Relationships (optional)
 # relationships:
@@ -284,7 +349,6 @@ schema:
 
 # Pipeline Options
 pipeline:
-  chunk_size: 25        # Rows per LLM extraction batch
   review: true          # Enable human-in-the-loop review
   log_level: info       # debug | info | warning | error
   # log_dir: ./logs     # Directory for log files

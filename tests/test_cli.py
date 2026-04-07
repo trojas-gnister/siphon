@@ -20,14 +20,14 @@ runner = CliRunner()
 
 _VALID_YAML = """\
 name: test_pipeline
-llm:
-  base_url: http://localhost:11434/v1
-  model: llama3
+source:
+  type: spreadsheet
 database:
   url: sqlite:///test.db
 schema:
   fields:
     - name: company_name
+      source: "Company Name"
       type: string
       db:
         table: companies
@@ -38,7 +38,6 @@ schema:
         column: id
         type: auto_increment
 pipeline:
-  chunk_size: 10
   log_level: info
   review: false
 """
@@ -66,7 +65,7 @@ def _write_valid_config(tmp_path: Path) -> Path:
 
 
 def _write_invalid_config(tmp_path: Path) -> Path:
-    """Write an invalid siphon.yaml (missing llm section) and return its path."""
+    """Write an invalid siphon.yaml (missing required sections) and return its path."""
     p = tmp_path / "siphon.yaml"
     p.write_text(_INVALID_YAML)
     return p
@@ -115,7 +114,7 @@ class TestHelp:
         assert "--dry-run" in result.output
         assert "--no-review" in result.output
         assert "--create-tables" in result.output
-        assert "--chunk-size" in result.output
+        assert "--chunk-size" not in result.output
         assert "--verbose" in result.output
         assert "--quiet" in result.output
 
@@ -300,7 +299,7 @@ class TestRunCommand:
         assert "Unexpected error" in result.output or "something broke" in result.output
 
     def test_run_passes_pipeline_args(self, tmp_path: Path):
-        """run passes dry_run, no_review, create_tables, and chunk_size to pipeline.run."""
+        """run passes dry_run, no_review, create_tables, and sheet to pipeline.run."""
         config_file = _write_valid_config(tmp_path)
 
         with patch("siphon.cli.Pipeline") as MockPipeline, \
@@ -319,7 +318,6 @@ class TestRunCommand:
                 "--dry-run",
                 "--no-review",
                 "--create-tables",
-                "--chunk-size", "5",
             ])
 
         mock_instance.run.assert_awaited_once_with(
@@ -327,7 +325,6 @@ class TestRunCommand:
             dry_run=True,
             no_review=True,
             create_tables=True,
-            chunk_size=5,
             sheet=None,
         )
 
