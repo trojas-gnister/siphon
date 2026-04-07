@@ -61,11 +61,22 @@ class ModelGenerator:
         belongs_to relationships, and creates the ORM class with all
         columns in a single pass.
         """
-        # Group fields by table
+        # Group fields by table (include both top-level and collection fields)
         table_fields: dict[str, list] = {}
         for field in self._config.schema_.fields:
             table_name = field.db.table
             table_fields.setdefault(table_name, []).append(field)
+
+        # Include collection fields so their target tables get proper columns
+        if self._config.schema_.collections:
+            for collection in self._config.schema_.collections:
+                for field in collection.fields:
+                    table_name = field.db.table
+                    # Avoid duplicate columns (a field name may appear in both
+                    # top-level and collection targeting the same table/column)
+                    existing = table_fields.get(table_name, [])
+                    if not any(f.db.column == field.db.column for f in existing):
+                        table_fields.setdefault(table_name, []).append(field)
 
         # Collect FK columns per table from belongs_to relationships
         table_fks: dict[str, dict[str, Column]] = {}

@@ -270,16 +270,26 @@ class Pipeline:
                 valid_records = batch.records
                 result.total_valid = len(valid_records)
 
-            # 11. Insert main records
-            result.total_inserted = await inserter.insert(valid_records)
+            # 11. Insert main records (target only top-level field tables)
+            main_tables = {f.db.table for f in self._config.schema_.fields}
+            result.total_inserted = await inserter.insert(
+                valid_records, target_tables=main_tables
+            )
 
             # 12. Insert collection records (if any)
-            if all_collection_records:
+            if all_collection_records and self._config.schema_.collections:
+                # Build a map of collection name -> set of target tables
+                coll_tables: dict[str, set[str]] = {}
+                for coll in self._config.schema_.collections:
+                    tables = {f.db.table for f in coll.fields}
+                    coll_tables[coll.name] = tables
+
                 for coll_name, coll_records in all_collection_records.items():
                     if coll_records:
-                        # Validate collection records using a collection-aware
-                        # validator if needed — for now insert directly
-                        await inserter.insert(coll_records)
+                        target = coll_tables.get(coll_name)
+                        await inserter.insert(
+                            coll_records, target_tables=target
+                        )
 
         finally:
             await db_engine.dispose()

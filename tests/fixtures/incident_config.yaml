@@ -1,0 +1,148 @@
+name: "incident-import-test"
+
+source:
+  type: xml
+  root: "Cases.Case"
+  encoding: utf-8
+  force_list:
+    - Case
+    - CaseNote
+    - Participant
+    - Attachment
+
+transforms:
+  file: ./tests/fixtures/incident_transforms.py
+
+variables:
+  reference_prefix: "TEST"
+  user_id: 1
+
+database:
+  url: "sqlite+aiosqlite://"  # overridden in test
+
+schema:
+  fields:
+    - name: uuid
+      transform:
+        type: uuid
+      type: string
+      db:
+        table: incidents
+        column: uuid
+
+    - name: reference_number
+      source: CaseCode
+      transform:
+        type: template
+        template: "{reference_prefix}-{value}"
+      type: string
+      required: true
+      db:
+        table: incidents
+        column: reference_number
+
+    - name: status_id
+      source: CaseStatus
+      transform:
+        type: map
+        values:
+          "Closed": 8
+          "In Process": 6
+          "Unreviewed": 3
+        default: 8
+      type: integer
+      db:
+        table: incidents
+        column: incident_status_id
+
+    - name: org_name
+      source: OrgName
+      type: string
+      db:
+        table: incidents
+        column: company
+
+    - name: work_location
+      transform:
+        type: custom
+        function: build_work_location
+        args: [LocationAddress, LocationCity, LocationState, LocationPostalCode, LocationCountry]
+      type: string
+      db:
+        table: incidents
+        column: work_location
+
+    - name: date_added
+      source: DateOpened
+      type: string
+      db:
+        table: incidents
+        column: date_added
+
+    - name: is_import
+      value: true
+      type: boolean
+      db:
+        table: incidents
+        column: is_data_import
+
+  collections:
+    - name: case_notes
+      source_path: "CaseNotes.CaseNote"
+      fields:
+        - name: note_text
+          source: CaseNote
+          type: string
+          db:
+            table: incident_notes
+            column: note
+
+        - name: note_date
+          source: Date
+          type: string
+          db:
+            table: incident_notes
+            column: date_added
+
+        - name: created_by
+          source: UserName
+          transform:
+            type: custom
+            function: reverse_name
+            args: [UserName]
+          type: string
+          db:
+            table: incident_notes
+            column: original_created_by
+
+        - name: reference_number
+          source: CaseCode
+          transform:
+            type: template
+            template: "{reference_prefix}-{value}"
+          type: string
+          db:
+            table: incident_notes
+            column: reference_number
+
+  tables:
+    incidents:
+      primary_key:
+        column: id
+        type: auto_increment
+    incident_notes:
+      primary_key:
+        column: id
+        type: auto_increment
+
+relationships:
+  - type: belongs_to
+    field: reference_number
+    table: incident_notes
+    references: incidents
+    fk_column: incident_id
+    resolve_by: reference_number
+
+pipeline:
+  review: false
+  log_level: info

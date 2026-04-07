@@ -163,6 +163,18 @@ class Mapper:
         """Map all source records to target field names."""
         return [self.map_record(r) for r in source_records]
 
+    @staticmethod
+    def _unwrap_single_list(value: Any) -> Any:
+        """Unwrap a single-element list to its contained value.
+
+        XML parsing with force_list can produce ["text"] for a text element
+        that shares its tag name with a forced-list element.  This helper
+        collapses such values so downstream transforms receive a scalar.
+        """
+        if isinstance(value, list) and len(value) == 1:
+            return value[0]
+        return value
+
     def _navigate_path(self, data: dict, path: str) -> Any:
         """Navigate a dot-separated path in a nested dict.
 
@@ -216,8 +228,10 @@ class Mapper:
             mapped_items = []
             for item in items:
                 # Merge parent record context so transforms can reference parent fields
-                # Item fields take precedence over parent fields on key collision
+                # Item fields take precedence over parent fields on key collision.
+                # Unwrap single-element lists that XML force_list may create.
                 context = {**source_record, **item}
+                context = {k: self._unwrap_single_list(v) for k, v in context.items()}
 
                 mapped = {}
                 for field in collection.fields:
@@ -232,6 +246,8 @@ class Mapper:
                         value = item.get(field.source)
                         if value is None:
                             value = source_record.get(field.source)
+                        # Unwrap single-element lists (XML force_list artefact)
+                        value = self._unwrap_single_list(value)
                         if field.transform:
                             value = self._apply_transform(
                                 field.transform, value, context

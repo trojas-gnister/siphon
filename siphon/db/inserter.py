@@ -138,13 +138,21 @@ class Inserter:
 
         return sorted_records
 
-    async def insert(self, records: list[dict]) -> int:
+    async def insert(self, records: list[dict], *, target_tables: set[str] | None = None) -> int:
         """Insert all records in a single transaction.
+
+        Args:
+            records: List of mapped record dicts.
+            target_tables: If provided, only insert into these tables.
+                          Used for collection records that should only go
+                          into their specific child table(s).
 
         Returns number of records inserted.
         Raises DatabaseError on failure (entire batch rolled back).
         """
         table_order = self.topological_sort()
+        if target_tables is not None:
+            table_order = [t for t in table_order if t in target_tables]
 
         # Sort records for self-referential relationships
         for rel in self._config.relationships:
@@ -152,10 +160,21 @@ class Inserter:
                 records = self._sort_records_for_self_ref(records, rel)
                 break
 
-        # Group fields by table for quick lookup
+        # Group fields by table for quick lookup.
+        # Start with top-level fields, then layer in collection fields
+        # for the target tables being inserted.
         table_fields: dict[str, list] = defaultdict(list)
         for field in self._config.schema_.fields:
             table_fields[field.db.table].append(field)
+
+        # Include collection fields for tables in this insert batch.
+        # Collection fields provide the column mappings for child tables.
+        if self._config.schema_.collections:
+            for collection in self._config.schema_.collections:
+                for field in collection.fields:
+                    existing = table_fields[field.db.table]
+                    if not any(f.db.column == field.db.column for f in existing):
+                        table_fields[field.db.table].append(field)
 
         # Find junction relationships
         junctions = [
