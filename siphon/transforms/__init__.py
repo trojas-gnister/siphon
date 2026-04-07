@@ -7,3 +7,7 @@ from siphon.transforms.builtins import (
     transform_now,
     transform_coalesce,
 )
+from siphon.transforms.loader import (
+    load_custom_transforms,
+    get_custom_transform,
+)
