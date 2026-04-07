@@ -1,8 +1,8 @@
-# siphon
+# Siphon — Configurable ETL Pipeline
 
-A configurable, YAML-driven, LLM-powered ETL pipeline for extracting structured data from spreadsheets and loading it into a database.
+Siphon is a YAML-driven ETL pipeline that loads spreadsheets and XML/JSON files, maps columns to a target schema, validates records, and inserts them into any SQLAlchemy-supported database. An optional human-in-the-loop review step lets you approve or reject records before they are committed.
 
-Siphon reads CSV, Excel, or ODS files, uses an LLM to extract and normalize fields according to your schema, validates the results, and inserts them into any SQLAlchemy-supported database. An optional human-in-the-loop review step lets you approve, reject, or revise records before they are committed.
+No LLM required — field mapping is declared directly in the config file.
 
 
 ## Installation
@@ -10,7 +10,7 @@ Siphon reads CSV, Excel, or ODS files, uses an LLM to extract and normalize fiel
 Requires Python 3.11 or later.
 
 ```
-pip install siphon
+pip install siphon-etl
 ```
 
 To use async database drivers (recommended):
@@ -35,7 +35,7 @@ pip install aiomysql
 siphon init
 ```
 
-This creates `siphon.yaml` in the current directory. Open it and configure your LLM, database, and schema.
+This creates `siphon.yaml` in the current directory. Open it and configure your database, source, and schema.
 
 **2. Validate your config:**
 
@@ -46,78 +46,21 @@ siphon validate
 **3. Run the pipeline:**
 
 ```
-siphon run data.csv
+siphon run data.csv --create-tables
 ```
 
-Siphon will extract, validate, and (after optional review) insert the records.
+Siphon will map, validate, and (after optional review) insert the records.
 
 
-## Example Config
+## Source Types
 
-```yaml
-name: "company-pipeline"
+| Type          | Description                              | File formats           |
+|---------------|------------------------------------------|------------------------|
+| `spreadsheet` | Tabular data from CSV or Excel files     | `.csv`, `.xlsx`, `.xls`, `.ods` |
+| `xml`         | Hierarchical XML records                 | `.xml`                 |
+| `json`        | JSON array or nested structure           | `.json`                |
 
-llm:
-  base_url: "http://localhost:11434/v1"   # Ollama, OpenAI, vLLM, LM Studio
-  model: "llama3"
-  api_key: ""                             # Required for OpenAI
-
-database:
-  url: "${DATABASE_URL}"                  # Environment variable substitution supported
-
-schema:
-  fields:
-    - name: company_name
-      type: string
-      required: true
-      min_length: 2
-      db:
-        table: companies
-        column: name
-
-    - name: phone
-      type: phone
-      db:
-        table: companies
-        column: phone_number
-
-    - name: website
-      type: url
-      db:
-        table: companies
-        column: website_url
-
-    - name: state
-      type: enum
-      preset: us_states
-      db:
-        table: companies
-        column: state_code
-
-    - name: founded
-      type: date
-      format: "%Y-%m-%d"
-      db:
-        table: companies
-        column: founded_date
-
-  tables:
-    companies:
-      primary_key:
-        column: id
-        type: auto_increment    # auto_increment | uuid
-
-  # Optional: deduplicate on key fields
-  deduplication:
-    key: [company_name]
-    check_db: true
-    match: case_insensitive     # exact | case_insensitive
-
-pipeline:
-  chunk_size: 25      # Rows per LLM batch
-  review: true        # Enable human-in-the-loop review
-  log_level: info     # debug | info | warning | error
-```
+For XML and JSON sources, use `root` to specify a dot-path to the list of records (e.g. `"Records.Item"`).
 
 
 ## Field Types
@@ -144,6 +87,196 @@ All 14 supported field types:
 **Enum presets:** `us_states` (US states and territories), `ca_provinces` (Canadian provinces and territories).
 
 
+## Transforms
+
+Built-in transforms can be applied inline on any field:
+
+| Type        | Description                                             |
+|-------------|---------------------------------------------------------|
+| `template`  | Build a string from other fields using `{field}` syntax |
+| `map`       | Map one value to another via a lookup dictionary        |
+| `concat`    | Join multiple fields with a separator                   |
+| `uuid`      | Generate a new UUID v4                                  |
+| `now`       | Insert the current timestamp                            |
+| `coalesce`  | Use the first non-empty value from a list of fields     |
+
+You can also load custom Python transform functions from a file:
+
+```yaml
+transforms:
+  file: transforms.py
+```
+
+```python
+# transforms.py
+def normalize_code(value, record):
+    return value.strip().upper()
+```
+
+Then reference it on a field:
+
+```yaml
+transform:
+  type: custom
+  function: normalize_code
+```
+
+
+## Collections
+
+For nested XML or JSON data, use `collections` to expand child records into separate table rows:
+
+```yaml
+schema:
+  collections:
+    - name: notes
+      source_path: "Notes.Note"
+      fields:
+        - name: note_text
+          source: text
+          type: string
+          db:
+            table: notes
+            column: body
+```
+
+
+## Example Config — Company Import
+
+```yaml
+name: "company-import"
+
+source:
+  type: spreadsheet
+
+database:
+  url: "${DATABASE_URL}"
+
+schema:
+  fields:
+    - name: company_name
+      source: "Company Name"
+      type: string
+      required: true
+      min_length: 2
+      db:
+        table: companies
+        column: name
+
+    - name: phone
+      source: "Phone"
+      type: phone
+      db:
+        table: companies
+        column: phone_number
+
+    - name: website
+      source: "Website"
+      type: url
+      db:
+        table: companies
+        column: website_url
+
+    - name: state
+      source: "State"
+      type: enum
+      preset: us_states
+      db:
+        table: companies
+        column: state_code
+
+    - name: founded
+      source: "Founded"
+      type: date
+      format: "%Y-%m-%d"
+      db:
+        table: companies
+        column: founded_date
+
+  tables:
+    companies:
+      primary_key:
+        column: id
+        type: auto_increment
+
+  deduplication:
+    key: [company_name]
+    check_db: true
+    match: case_insensitive
+
+pipeline:
+  review: false
+  log_level: info
+```
+
+
+## Example Config — Incident XML Import
+
+```yaml
+name: "incident-import"
+
+source:
+  type: xml
+  root: "Incidents.Incident"
+  encoding: utf-8
+
+database:
+  url: "${DATABASE_URL}"
+
+schema:
+  fields:
+    - name: incident_id
+      source: "@id"
+      type: string
+      required: true
+      db:
+        table: incidents
+        column: external_id
+
+    - name: reported_date
+      source: "ReportedDate"
+      type: date
+      format: "%Y-%m-%d"
+      db:
+        table: incidents
+        column: reported_date
+
+    - name: severity
+      source: "Severity"
+      type: enum
+      values: [low, medium, high, critical]
+      case: lower
+      db:
+        table: incidents
+        column: severity
+
+  collections:
+    - name: notes
+      source_path: "Notes.Note"
+      fields:
+        - name: note_body
+          source: "Body"
+          type: string
+          db:
+            table: incident_notes
+            column: body
+
+  tables:
+    incidents:
+      primary_key:
+        column: id
+        type: auto_increment
+    incident_notes:
+      primary_key:
+        column: id
+        type: uuid
+
+pipeline:
+  review: false
+  log_level: info
+```
+
+
 ## CLI Reference
 
 ### `siphon run <input_path>`
@@ -154,21 +287,20 @@ Execute the full ETL pipeline.
 |-------------------|----------------|-------------------------------------------------------|
 | `--config`, `-c`  | `siphon.yaml`  | Path to YAML config file                              |
 | `--create-tables` | off            | Auto-create tables if they do not exist               |
-| `--dry-run`       | off            | Extract and validate only, skip DB insertion          |
+| `--dry-run`       | off            | Map and validate only, skip DB insertion              |
 | `--no-review`     | off            | Skip human-in-the-loop review, insert directly        |
-| `--chunk-size N`  | from config    | Override number of rows per LLM batch                 |
 | `--sheet`         | first sheet    | Sheet name or index for multi-sheet Excel files       |
 | `--verbose`, `-v` | off            | Set log level to `debug`                              |
 | `--quiet`, `-q`   | off            | Set log level to `error`                              |
 
-`<input_path>` can be a single file (`data.csv`, `data.xlsx`, `data.ods`) or a directory. When a directory is given, all spreadsheet files inside it are processed in sequence.
+`<input_path>` can be a single file (`data.csv`, `data.xlsx`, `data.xml`) or a directory. When a directory is given, all matching source files inside it are processed in sequence.
 
 ### `siphon validate`
 
 Validate a config file without running the pipeline.
 
-| Flag             | Default       | Description             |
-|------------------|---------------|-------------------------|
+| Flag             | Default       | Description              |
+|------------------|---------------|--------------------------|
 | `--config`, `-c` | `siphon.yaml` | Path to YAML config file |
 
 ### `siphon init`
@@ -177,7 +309,7 @@ Generate a starter `siphon.yaml` in the current directory. Prompts before overwr
 
 ### `siphon --version`
 
-Print the installed siphon version and exit.
+Print the installed Siphon version and exit.
 
 
 ## Supported Databases
@@ -195,10 +327,10 @@ Environment variable substitution is supported anywhere in the config via `${VAR
 
 ## Dependencies
 
-- `openai` — LLM client (OpenAI-compatible API)
 - `sqlalchemy[asyncio]` — async database engine and ORM
 - `pydantic` — config validation and record models
 - `pandas` / `openpyxl` / `odfpy` — spreadsheet parsing
+- `lxml` — XML parsing
 - `typer` / `rich` — CLI and terminal output
 - `pyyaml` / `python-dotenv` — config loading
 - `pycountry` — enum presets for country and subdivision fields

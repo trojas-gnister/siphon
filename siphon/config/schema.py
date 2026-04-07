@@ -8,23 +8,6 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 # ---------------------------------------------------------------------------
-# Deprecated — kept as stub so existing v1 modules don't break at import time.
-# Will be removed in a later task when all dependents are updated.
-# ---------------------------------------------------------------------------
-
-
-class LLMConfig(BaseModel):
-    """DEPRECATED: Configuration for the LLM provider. Retained as import stub."""
-
-    model_config = ConfigDict(populate_by_name=True)
-
-    base_url: str = ""
-    model: str = ""
-    api_key: str = ""
-    extraction_hints: str | None = None
-
-
-# ---------------------------------------------------------------------------
 # Sub-models
 # ---------------------------------------------------------------------------
 
