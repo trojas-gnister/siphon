@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 from rich.console import Console
@@ -10,7 +10,6 @@ from rich.console import Console
 from siphon.config.schema import SiphonConfig
 from siphon.core.review_cli import ReviewCLI
 from siphon.core.reviewer import ReviewBatch, ReviewStatus
-from siphon.utils.errors import ReviewError
 
 
 # ---------------------------------------------------------------------------
@@ -23,11 +22,7 @@ def _make_config() -> SiphonConfig:
     return SiphonConfig.model_validate(
         {
             "name": "test_pipeline",
-            "llm": {
-                "base_url": "https://api.example.com",
-                "model": "gpt-4o-mini",
-                "api_key": "sk-test",
-            },
+            "source": {"type": "spreadsheet"},
             "database": {"url": "sqlite+aiosqlite:///test.db"},
             "schema": {
                 "fields": [
@@ -48,24 +43,16 @@ def _make_config() -> SiphonConfig:
     )
 
 
-def _make_llm_client(return_value: list[dict] | None = None) -> MagicMock:
-    client = MagicMock()
-    client.extract_json = AsyncMock(return_value=return_value or [])
-    return client
-
-
 SAMPLE_RECORDS = [
     {"company_name": "Acme Corp"},
     {"company_name": "Globex"},
 ]
 
 
-def _make_batch(records: list[dict] | None = None, llm_return: list[dict] | None = None) -> ReviewBatch:
+def _make_batch(records: list[dict] | None = None) -> ReviewBatch:
     config = _make_config()
-    llm = _make_llm_client(return_value=llm_return)
     return ReviewBatch(
         records=list(records if records is not None else SAMPLE_RECORDS),
-        llm_client=llm,
         config=config,
     )
 
@@ -208,51 +195,36 @@ async def test_reject_shortcut_ends_loop(mock_ask, review_cli):
 
 
 # ---------------------------------------------------------------------------
-# 9. run_review with revision command calls batch.revise() then prompts again
+# 9. run_review with unknown input prints error and stays in loop
 # ---------------------------------------------------------------------------
 
 
 @patch("siphon.core.review_cli.Prompt.ask")
-async def test_revision_command_calls_revise(mock_ask, review_cli, console):
-    # First input triggers a revision, second approves
-    mock_ask.side_effect = ["rename first company", "approve"]
-
-    revised_records = [{"company_name": "New Corp"}]
-    batch = _make_batch(llm_return=revised_records)
+async def test_unknown_action_prints_error_and_continues(mock_ask, review_cli, console):
+    # First input is unknown, second approves
+    mock_ask.side_effect = ["bad command", "approve"]
+    batch = _make_batch()
 
     result = await review_cli.run_review(batch)
 
     assert result.status == ReviewStatus.APPROVED
     assert mock_ask.call_count == 2
-
     output = console.export_text()
-    assert "Revising with:" in output
-    assert "Revision complete" in output
+    assert "Unknown action" in output
 
 
 # ---------------------------------------------------------------------------
-# 10. run_review handles revision failure gracefully (prints error, continues)
+# 10. _display_batch does not show revision count
 # ---------------------------------------------------------------------------
 
 
-@patch("siphon.core.review_cli.Prompt.ask")
-async def test_revision_failure_prints_error_and_continues(mock_ask, review_cli, console):
-    # First causes a failing revision, second approves
-    mock_ask.side_effect = ["bad command", "approve"]
-
+def test_display_batch_no_revision_count(review_cli, console):
     batch = _make_batch()
-    # Patch revise to raise ReviewError
-    async def _failing_revise(cmd: str) -> ReviewBatch:
-        raise ReviewError("LLM unavailable")
-
-    batch.revise = _failing_revise  # type: ignore[method-assign]
-
-    result = await review_cli.run_review(batch)
-
-    # Loop continued after the error and approved on second prompt
-    assert result.status == ReviewStatus.APPROVED
+    review_cli._display_batch(batch)
     output = console.export_text()
-    assert "Revision failed" in output
+
+    assert "Revisions" not in output
+    assert "revision" not in output.lower()
 
 
 # ---------------------------------------------------------------------------
@@ -328,3 +300,19 @@ async def test_reject_case_insensitive(mock_ask, review_cli):
     result = await review_cli.run_review(batch)
 
     assert result.status == ReviewStatus.REJECTED
+
+
+# ---------------------------------------------------------------------------
+# 16. run_review prompt text does not mention revision
+# ---------------------------------------------------------------------------
+
+
+@patch("siphon.core.review_cli.Prompt.ask")
+async def test_prompt_text_no_revision_mention(mock_ask, review_cli, console):
+    mock_ask.return_value = "approve"
+    batch = _make_batch()
+
+    await review_cli.run_review(batch)
+
+    output = console.export_text()
+    assert "revision" not in output.lower()
