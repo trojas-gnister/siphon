@@ -69,9 +69,9 @@ class TestInitFileIsValidYaml:
         assert parsed is not None
 
     def test_parsed_yaml_has_expected_top_level_keys(self):
-        """The parsed YAML should contain name, llm, database, schema, pipeline."""
+        """The parsed YAML should contain name, source, database, schema, pipeline."""
         parsed = yaml.safe_load(INIT_TEMPLATE)
-        for key in ("name", "llm", "database", "schema", "pipeline"):
+        for key in ("name", "source", "database", "schema", "pipeline"):
             assert key in parsed, f"Missing top-level key: {key}"
 
 
@@ -113,33 +113,24 @@ class TestAllFieldTypesPresent:
 
 
 # ---------------------------------------------------------------------------
-# 4. Template includes LLM config section
+# 4. Template includes source config section
 # ---------------------------------------------------------------------------
 
 
-class TestLlmSection:
-    def test_llm_section_present_in_template(self):
-        """INIT_TEMPLATE must contain an llm: section."""
-        assert "llm:" in INIT_TEMPLATE
+class TestSourceSection:
+    def test_source_section_present_in_template(self):
+        """INIT_TEMPLATE must contain a source: section."""
+        assert "source:" in INIT_TEMPLATE
 
-    def test_llm_has_base_url(self):
-        """llm section should include a base_url example."""
-        assert "base_url" in INIT_TEMPLATE
+    def test_source_has_type(self):
+        """source section should include a type field."""
+        assert "type:" in INIT_TEMPLATE
 
-    def test_llm_has_model(self):
-        """llm section should include a model example."""
-        assert "model" in INIT_TEMPLATE
-
-    def test_llm_has_api_key(self):
-        """llm section should include an api_key field."""
-        assert "api_key" in INIT_TEMPLATE
-
-    def test_parsed_llm_keys(self):
-        """Parsed YAML llm section must contain base_url, model, api_key."""
+    def test_parsed_source_keys(self):
+        """Parsed YAML source section must contain a type key."""
         parsed = yaml.safe_load(INIT_TEMPLATE)
-        llm = parsed.get("llm", {})
-        for key in ("base_url", "model", "api_key"):
-            assert key in llm, f"llm.{key} missing from parsed template"
+        source = parsed.get("source", {})
+        assert "type" in source, "source.type missing from parsed template"
 
 
 # ---------------------------------------------------------------------------
@@ -195,10 +186,6 @@ class TestPipelineSection:
         """INIT_TEMPLATE must contain a pipeline: section."""
         assert "pipeline:" in INIT_TEMPLATE
 
-    def test_pipeline_has_chunk_size(self):
-        """pipeline section should include chunk_size."""
-        assert "chunk_size" in INIT_TEMPLATE
-
     def test_pipeline_has_review(self):
         """pipeline section should include review flag."""
         assert "review" in INIT_TEMPLATE
@@ -208,8 +195,8 @@ class TestPipelineSection:
         assert "log_level" in INIT_TEMPLATE
 
     def test_parsed_pipeline_keys(self):
-        """Parsed YAML pipeline section must contain chunk_size, review, log_level."""
+        """Parsed YAML pipeline section must contain review and log_level."""
         parsed = yaml.safe_load(INIT_TEMPLATE)
         pipeline = parsed.get("pipeline", {})
-        for key in ("chunk_size", "review", "log_level"):
+        for key in ("review", "log_level"):
             assert key in pipeline, f"pipeline.{key} missing from parsed template"

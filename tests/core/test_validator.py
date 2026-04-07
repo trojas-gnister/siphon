@@ -36,11 +36,7 @@ def _make_config(extra_fields: list[dict] | None = None, extra_tables: dict | No
     return SiphonConfig.model_validate(
         {
             "name": "test",
-            "llm": {
-                "base_url": "https://api.example.com",
-                "model": "gpt-4o-mini",
-                "api_key": "sk-test",
-            },
+            "source": {"type": "spreadsheet"},
             "database": {"url": "sqlite+aiosqlite:///test.db"},
             "schema": {"fields": fields, "tables": tables},
         }

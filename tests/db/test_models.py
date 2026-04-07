@@ -18,11 +18,7 @@ def _make_config(overrides: dict | None = None) -> SiphonConfig:
     """Build a minimal SiphonConfig dict, apply overrides, and validate."""
     base = {
         "name": "test_pipeline",
-        "llm": {
-            "base_url": "https://api.example.com/v1",
-            "model": "gpt-4o-mini",
-            "api_key": "sk-test",
-        },
+        "source": {"type": "spreadsheet"},
         "database": {"url": "sqlite+aiosqlite://"},
         "schema": {
             "fields": [
@@ -200,11 +196,7 @@ class TestBelongsToRelationship:
         """Config with a belongs_to FK from contacts -> companies."""
         return SiphonConfig.model_validate({
             "name": "test_pipeline",
-            "llm": {
-                "base_url": "https://api.example.com/v1",
-                "model": "gpt-4o-mini",
-                "api_key": "sk-test",
-            },
+            "source": {"type": "spreadsheet"},
             "database": {"url": "sqlite+aiosqlite://"},
             "schema": {
                 "fields": [
@@ -271,11 +263,7 @@ class TestBelongsToRelationship:
         """FK can reference the same table (self-referential)."""
         config = SiphonConfig.model_validate({
             "name": "test_pipeline",
-            "llm": {
-                "base_url": "https://api.example.com/v1",
-                "model": "gpt-4o-mini",
-                "api_key": "sk-test",
-            },
+            "source": {"type": "spreadsheet"},
             "database": {"url": "sqlite+aiosqlite://"},
             "schema": {
                 "fields": [
@@ -310,11 +298,7 @@ class TestBelongsToRelationship:
         """FK type is String(36) when parent PK is uuid."""
         config = SiphonConfig.model_validate({
             "name": "test_pipeline",
-            "llm": {
-                "base_url": "https://api.example.com/v1",
-                "model": "gpt-4o-mini",
-                "api_key": "sk-test",
-            },
+            "source": {"type": "spreadsheet"},
             "database": {"url": "sqlite+aiosqlite://"},
             "schema": {
                 "fields": [
@@ -362,11 +346,7 @@ class TestJunctionTable:
         """Config with a junction table between companies and categories."""
         return SiphonConfig.model_validate({
             "name": "test_pipeline",
-            "llm": {
-                "base_url": "https://api.example.com/v1",
-                "model": "gpt-4o-mini",
-                "api_key": "sk-test",
-            },
+            "source": {"type": "spreadsheet"},
             "database": {"url": "sqlite+aiosqlite://"},
             "schema": {
                 "fields": [
@@ -447,11 +427,7 @@ class TestMultipleTables:
         """Fields are grouped to their correct tables based on db.table."""
         config = SiphonConfig.model_validate({
             "name": "test_pipeline",
-            "llm": {
-                "base_url": "https://api.example.com/v1",
-                "model": "gpt-4o-mini",
-                "api_key": "sk-test",
-            },
+            "source": {"type": "spreadsheet"},
             "database": {"url": "sqlite+aiosqlite://"},
             "schema": {
                 "fields": [
@@ -487,11 +463,7 @@ class TestMultipleTables:
         """A table with no fields still gets a PK column."""
         config = SiphonConfig.model_validate({
             "name": "test_pipeline",
-            "llm": {
-                "base_url": "https://api.example.com/v1",
-                "model": "gpt-4o-mini",
-                "api_key": "sk-test",
-            },
+            "source": {"type": "spreadsheet"},
             "database": {"url": "sqlite+aiosqlite://"},
             "schema": {
                 "fields": [
@@ -526,11 +498,7 @@ class TestRoundTrip:
         """Generated models can actually create tables in an in-memory SQLite DB."""
         config = SiphonConfig.model_validate({
             "name": "test_pipeline",
-            "llm": {
-                "base_url": "https://api.example.com/v1",
-                "model": "gpt-4o-mini",
-                "api_key": "sk-test",
-            },
+            "source": {"type": "spreadsheet"},
             "database": {"url": "sqlite+aiosqlite://"},
             "schema": {
                 "fields": [

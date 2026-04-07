@@ -159,9 +159,8 @@ class Extractor:
         end_row = start_row + row_count - 1
         row_range = f"rows {start_row}-{end_row}"
         fields = self._config.schema_.fields
-        hints = self._config.llm.extraction_hints
 
-        prompt = build_extraction_prompt(fields, chunk_csv, row_count, hints)
+        prompt = build_extraction_prompt(fields, chunk_csv, row_count)
 
         # --- first attempt -------------------------------------------
         try:

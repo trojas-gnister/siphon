@@ -1,4 +1,4 @@
-"""Tests for error recovery and skip reporting (Task 23)."""
+"""Tests for error recovery and skip reporting."""
 
 from __future__ import annotations
 
@@ -19,19 +19,12 @@ from siphon.utils.errors import ExtractionError
 # Config helpers
 # ---------------------------------------------------------------------------
 
-_LLM_BLOCK = {
-    "base_url": "https://api.example.com/v1",
-    "model": "gpt-4o-mini",
-    "api_key": "sk-test",
-}
-
-
 def _make_config(chunk_size: int = 25) -> SiphonConfig:
     """Return a SiphonConfig with the given chunk_size."""
     return SiphonConfig.model_validate(
         {
             "name": "test_error_recovery",
-            "llm": _LLM_BLOCK,
+            "source": {"type": "spreadsheet"},
             "database": {"url": "sqlite+aiosqlite://"},
             "schema": {
                 "fields": [
@@ -341,16 +334,38 @@ async def test_validation_errors_logged_with_field_details(
     tmp_path: Path,
 ) -> None:
     """Invalid records trigger WARNING log messages containing field-level error details."""
-    config = _make_config(chunk_size=50)
+    # Build a v2 config with source column mapping
+    config = SiphonConfig.model_validate({
+        "name": "test_validation_logging",
+        "source": {"type": "spreadsheet"},
+        "database": {"url": "sqlite+aiosqlite://"},
+        "schema": {
+            "fields": [
+                {
+                    "name": "company_name",
+                    "source": "company_name",
+                    "type": "string",
+                    "required": True,
+                    "db": {"table": "companies", "column": "name"},
+                },
+            ],
+            "tables": {
+                "companies": {
+                    "primary_key": {"column": "id", "type": "auto_increment"},
+                },
+            },
+        },
+        "pipeline": {
+            "review": False,
+            "log_level": "warning",
+        },
+    })
+
+    # Write a CSV where second row has empty company_name (fails required)
     csv_path = _write_csv(tmp_path, [
         {"company_name": "Valid Corp"},
         {"company_name": ""},  # fails required validation
     ])
-
-    extracted_records = [
-        {"company_name": "Valid Corp"},
-        {"company_name": ""},
-    ]
 
     log_records: list[logging.LogRecord] = []
 
@@ -360,19 +375,13 @@ async def test_validation_errors_logged_with_field_details(
 
     capture_handler = _Capture(level=logging.WARNING)
 
-    # Patch setup_logging to be a no-op so it doesn't clear our capture handler,
-    # and attach our handler directly to the "siphon" logger.
+    # Attach our handler directly to the "siphon" logger.
     siphon_logger = logging.getLogger("siphon")
     siphon_logger.setLevel(logging.WARNING)
     siphon_logger.addHandler(capture_handler)
 
     try:
-        with patch("siphon.core.pipeline.LLMClient") as MockLLM, \
-             patch("siphon.core.pipeline.setup_logging"):
-            mock_llm_instance = MagicMock()
-            mock_llm_instance.extract_json = AsyncMock(return_value=extracted_records)
-            MockLLM.return_value = mock_llm_instance
-
+        with patch("siphon.core.pipeline.setup_logging"):
             pipeline = Pipeline(config)
             result = await pipeline.run(csv_path, dry_run=True)
     finally:
@@ -398,39 +407,48 @@ async def test_validation_errors_logged_with_field_details(
 
 
 @pytest.mark.asyncio
-async def test_pipeline_result_includes_skip_report_with_row_ranges(
+async def test_pipeline_result_skipped_chunks_empty_on_success(
     tmp_path: Path,
 ) -> None:
-    """PipelineResult.skipped_chunks contains entries with row_range keys."""
-    config = _make_config(chunk_size=1)
+    """PipelineResult.skipped_chunks is empty when all records load successfully."""
+    # Build a v2 config with source column mapping
+    config = SiphonConfig.model_validate({
+        "name": "test_skipped_chunks",
+        "source": {"type": "spreadsheet"},
+        "database": {"url": "sqlite+aiosqlite://"},
+        "schema": {
+            "fields": [
+                {
+                    "name": "company_name",
+                    "source": "company_name",
+                    "type": "string",
+                    "required": True,
+                    "db": {"table": "companies", "column": "name"},
+                },
+            ],
+            "tables": {
+                "companies": {
+                    "primary_key": {"column": "id", "type": "auto_increment"},
+                },
+            },
+        },
+        "pipeline": {
+            "review": False,
+            "log_level": "warning",
+        },
+    })
+
     csv_path = _write_csv(tmp_path, [
         {"company_name": "Acme"},
         {"company_name": "Beta"},
         {"company_name": "Gamma"},
     ])
 
-    with patch("siphon.core.pipeline.LLMClient") as MockLLM:
-        mock_llm_instance = MagicMock()
-        mock_llm_instance.extract_json = AsyncMock(
-            side_effect=[
-                [{"company_name": "Acme"}],      # chunk 0: success
-                ExtractionError("LLM timeout"),   # chunk 1: failure
-                [{"company_name": "Gamma"}],      # chunk 2: success
-            ]
-        )
-        MockLLM.return_value = mock_llm_instance
+    pipeline = Pipeline(config)
+    result = await pipeline.run(csv_path, dry_run=True)
 
-        pipeline = Pipeline(config)
-        result = await pipeline.run(csv_path, dry_run=True)
-
-    assert result.total_extracted == 2
-    assert len(result.skipped_chunks) == 1
-
-    skip = result.skipped_chunks[0]
-    assert "row_range" in skip
-    assert skip["row_range"] == "rows 2-2"  # chunk_size=1, chunk 1 → row 2
-    assert skip["rows_affected"] == 1
-    assert "LLM error" in skip["reason"]
+    assert result.total_extracted == 3
+    assert result.skipped_chunks == []
 
 
 # ---------------------------------------------------------------------------

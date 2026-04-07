@@ -329,11 +329,7 @@ async def test_extract_llm_failure_on_one_chunk_others_succeed(
     # chunk_size=1 so we get 3 separate chunks.
     cfg_dict = {
         "name": "test_pipeline",
-        "llm": {
-            "base_url": "https://api.openai.com/v1",
-            "model": "gpt-4o-mini",
-            "api_key": "sk-test",
-        },
+        "source": {"type": "spreadsheet"},
         "database": {"url": "sqlite+aiosqlite:///test.db"},
         "schema": {
             "fields": [
@@ -392,11 +388,7 @@ async def test_extract_multiple_chunks_concurrent(
     """All chunks are dispatched concurrently and their results are combined."""
     cfg_dict = {
         "name": "test_pipeline",
-        "llm": {
-            "base_url": "https://api.openai.com/v1",
-            "model": "gpt-4o-mini",
-            "api_key": "sk-test",
-        },
+        "source": {"type": "spreadsheet"},
         "database": {"url": "sqlite+aiosqlite:///test.db"},
         "schema": {
             "fields": [

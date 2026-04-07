@@ -15,9 +15,8 @@ from siphon.utils.errors import ConfigError
 # validate_config should return warnings but NOT raise.
 MINIMAL_VALID_YAML = """\
 name: test_pipeline
-llm:
-  base_url: http://localhost:11434/v1
-  model: llama3
+source:
+  type: spreadsheet
 database:
   url: sqlite:///test.db
 schema:
@@ -33,7 +32,6 @@ schema:
         column: id
         type: auto_increment
 pipeline:
-  chunk_size: 10
   log_level: info
 """
 
@@ -41,9 +39,8 @@ pipeline:
 # validate_config should return an empty warnings list.
 FULL_VALID_YAML = """\
 name: full_pipeline
-llm:
-  base_url: http://localhost:11434/v1
-  model: llama3
+source:
+  type: spreadsheet
 database:
   url: sqlite:///test.db
 schema:
@@ -80,7 +77,6 @@ relationships:
     fk_column: industry_id
     resolve_by: name
 pipeline:
-  chunk_size: 25
   review: true
   log_level: info
 """
