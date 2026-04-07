@@ -162,3 +162,86 @@ class Mapper:
     def map_records(self, source_records: list[dict]) -> list[dict]:
         """Map all source records to target field names."""
         return [self.map_record(r) for r in source_records]
+
+    def _navigate_path(self, data: dict, path: str) -> Any:
+        """Navigate a dot-separated path in a nested dict.
+
+        E.g., _navigate_path({"A": {"B": [1, 2]}}, "A.B") returns [1, 2]
+        Returns None if any segment is missing.
+        """
+        current = data
+        for part in path.split("."):
+            if isinstance(current, dict):
+                current = current.get(part)
+            else:
+                return None
+            if current is None:
+                return None
+        return current
+
+    def map_collections(
+        self, source_record: dict, parent_mapped: dict
+    ) -> dict[str, list[dict]]:
+        """Expand nested collections from a source record.
+
+        For each collection in config.schema_.collections:
+        1. Navigate to the collection's source_path in the source record
+        2. For each item in the nested array, map its fields
+        3. The mapping context includes both the nested item AND the parent record
+           (so transforms can reference parent fields like case_code)
+
+        Args:
+            source_record: The full source record (with nested data)
+            parent_mapped: The already-mapped parent record (for reference)
+
+        Returns:
+            Dict mapping collection_name to list of mapped records.
+            Empty dict if no collections configured.
+        """
+        if not self._config.schema_.collections:
+            return {}
+
+        result: dict[str, list[dict]] = {}
+
+        for collection in self._config.schema_.collections:
+            items = self._navigate_path(source_record, collection.source_path)
+
+            if items is None:
+                continue
+
+            # Ensure items is a list (xmltodict may return a single dict for 1 item)
+            if not isinstance(items, list):
+                items = [items]
+
+            mapped_items = []
+            for item in items:
+                # Merge parent record context so transforms can reference parent fields
+                # Item fields take precedence over parent fields on key collision
+                context = {**source_record, **item}
+
+                mapped = {}
+                for field in collection.fields:
+                    if field.value is not None:
+                        mapped[field.name] = field.value
+                    elif field.transform and not field.source:
+                        mapped[field.name] = self._apply_transform(
+                            field.transform, None, context
+                        )
+                    elif field.source:
+                        # Look up source in the ITEM first, then fall back to parent
+                        value = item.get(field.source)
+                        if value is None:
+                            value = source_record.get(field.source)
+                        if field.transform:
+                            value = self._apply_transform(
+                                field.transform, value, context
+                            )
+                        mapped[field.name] = value
+                    else:
+                        mapped[field.name] = None
+
+                mapped_items.append(mapped)
+
+            result[collection.name] = mapped_items
+
+        return result

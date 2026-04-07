@@ -334,3 +334,253 @@ def test_source_plus_transform():
     mapper = Mapper(cfg)
     result = mapper.map_record({"status": "Active"})
     assert result == {"status_id": 1}
+
+
+# ---------------------------------------------------------------------------
+# Helpers for collection tests
+# ---------------------------------------------------------------------------
+
+def _collection_config_dict(fields, collections, **overrides):
+    """Return a config dict that includes both parent fields and collections."""
+    tables = {
+        "ws_cases": {"primary_key": {"column": "id", "type": "auto_increment"}},
+        "ws_incident_notes": {"primary_key": {"column": "id", "type": "auto_increment"}},
+    }
+    base = {
+        "name": "test",
+        "source": {"type": "xml"},
+        "database": {"url": "sqlite:///test.db"},
+        "schema": {
+            "fields": fields,
+            "collections": collections,
+            "tables": tables,
+        },
+    }
+    base.update(overrides)
+    return base
+
+
+def _parent_field(name, **kwargs):
+    f = {"name": name, "db": {"table": "ws_cases", "column": name}}
+    f.update(kwargs)
+    return f
+
+
+def _note_field(name, **kwargs):
+    f = {"name": name, "db": {"table": "ws_incident_notes", "column": name}}
+    f.update(kwargs)
+    return f
+
+
+# ---------------------------------------------------------------------------
+# 21. Collection expansion tests
+# ---------------------------------------------------------------------------
+
+
+class TestCollectionExpansion:
+    """Tests for Mapper.map_collections() and Mapper._navigate_path()."""
+
+    # -- source record fixture used by multiple tests -----------------------
+    SOURCE_RECORD = {
+        "CaseCode": "abc-123",
+        "CaseNotes": {
+            "CaseNote": [
+                {"CaseNote": "First note", "Date": "2025-01-01", "UserName": "Smith, John"},
+                {"CaseNote": "Second note", "Date": "2025-01-02", "UserName": "Doe, Jane"},
+            ]
+        },
+    }
+
+    def _make_mapper(self, collections=None):
+        """Build a Mapper with a minimal parent field and the given collections."""
+        cfg = SiphonConfig.model_validate(_collection_config_dict(
+            fields=[_parent_field("case_code", source="CaseCode")],
+            collections=collections or [
+                {
+                    "name": "case_notes",
+                    "source_path": "CaseNotes.CaseNote",
+                    "fields": [
+                        _note_field("note", source="CaseNote"),
+                        _note_field("created_date", source="Date"),
+                    ],
+                }
+            ],
+        ))
+        return Mapper(cfg)
+
+    def test_basic_collection_expansion(self):
+        """Nested list produces multiple mapped records."""
+        mapper = self._make_mapper()
+        parent_mapped = {"case_code": "abc-123"}
+        result = mapper.map_collections(self.SOURCE_RECORD, parent_mapped)
+
+        assert "case_notes" in result
+        notes = result["case_notes"]
+        assert len(notes) == 2
+        assert notes[0] == {"note": "First note", "created_date": "2025-01-01"}
+        assert notes[1] == {"note": "Second note", "created_date": "2025-01-02"}
+
+    def test_single_item_not_list(self):
+        """Single nested dict (not list) is treated as a 1-item list."""
+        source = {
+            "CaseCode": "xyz-999",
+            "CaseNotes": {
+                "CaseNote": {"CaseNote": "Only note", "Date": "2025-03-01"},
+            },
+        }
+        mapper = self._make_mapper()
+        result = mapper.map_collections(source, {"case_code": "xyz-999"})
+
+        notes = result["case_notes"]
+        assert len(notes) == 1
+        assert notes[0]["note"] == "Only note"
+
+    def test_collection_field_from_item(self):
+        """Collection fields are read from the nested item, not the parent."""
+        mapper = self._make_mapper()
+        result = mapper.map_collections(self.SOURCE_RECORD, {})
+
+        # "CaseNote" key lives inside each nested item, not on the parent
+        assert result["case_notes"][0]["note"] == "First note"
+        assert result["case_notes"][1]["note"] == "Second note"
+
+    def test_collection_field_from_parent(self):
+        """Collection field that doesn't exist on the item falls back to parent record."""
+        cfg = SiphonConfig.model_validate(_collection_config_dict(
+            fields=[_parent_field("case_code", source="CaseCode")],
+            collections=[
+                {
+                    "name": "case_notes",
+                    "source_path": "CaseNotes.CaseNote",
+                    "fields": [
+                        _note_field("note", source="CaseNote"),
+                        # CaseCode lives on the parent, not inside each CaseNote item
+                        _note_field("case_ref", source="CaseCode"),
+                    ],
+                }
+            ],
+        ))
+        mapper = Mapper(cfg)
+        result = mapper.map_collections(self.SOURCE_RECORD, {"case_code": "abc-123"})
+
+        for note in result["case_notes"]:
+            assert note["case_ref"] == "abc-123"
+
+    def test_collection_with_transform(self):
+        """Transform is applied to collection field values."""
+        def reverse_name(name):
+            # "Smith, John" -> "John Smith"
+            if name and "," in name:
+                last, first = name.split(",", 1)
+                return f"{first.strip()} {last.strip()}"
+            return name
+
+        cfg = SiphonConfig.model_validate(_collection_config_dict(
+            fields=[_parent_field("case_code", source="CaseCode")],
+            collections=[
+                {
+                    "name": "case_notes",
+                    "source_path": "CaseNotes.CaseNote",
+                    "fields": [
+                        _note_field("note", source="CaseNote"),
+                        _note_field("created_by", source="UserName", transform={
+                            "type": "custom",
+                            "function": "reverse_name",
+                            "args": ["UserName"],
+                        }),
+                    ],
+                }
+            ],
+        ))
+        mapper = Mapper(cfg, custom_transforms={"reverse_name": reverse_name})
+        result = mapper.map_collections(self.SOURCE_RECORD, {})
+
+        assert result["case_notes"][0]["created_by"] == "John Smith"
+        assert result["case_notes"][1]["created_by"] == "Jane Doe"
+
+    def test_collection_with_constant_value(self):
+        """Constant value fields in collections resolve correctly."""
+        cfg = SiphonConfig.model_validate(_collection_config_dict(
+            fields=[_parent_field("case_code", source="CaseCode")],
+            collections=[
+                {
+                    "name": "case_notes",
+                    "source_path": "CaseNotes.CaseNote",
+                    "fields": [
+                        _note_field("note", source="CaseNote"),
+                        _note_field("active", value=True),
+                    ],
+                }
+            ],
+        ))
+        mapper = Mapper(cfg)
+        result = mapper.map_collections(self.SOURCE_RECORD, {})
+
+        for note in result["case_notes"]:
+            assert note["active"] is True
+
+    def test_empty_collection(self):
+        """Missing nested path produces no entry for that collection."""
+        source = {"CaseCode": "no-notes"}  # No CaseNotes key at all
+        mapper = self._make_mapper()
+        result = mapper.map_collections(source, {"case_code": "no-notes"})
+
+        # Path not found → collection omitted from result
+        assert "case_notes" not in result
+
+    def test_no_collections_configured(self):
+        """Returns empty dict when no collections defined in config."""
+        cfg = SiphonConfig.model_validate(_config_dict([
+            _field("name", source="Name"),
+        ]))
+        mapper = Mapper(cfg)
+        result = mapper.map_collections({"Name": "Alice"}, {"name": "Alice"})
+        assert result == {}
+
+    def test_navigate_path_basic(self):
+        """Dot-separated path navigates nested dicts correctly."""
+        cfg = SiphonConfig.model_validate(_config_dict([_field("x")]))
+        mapper = Mapper(cfg)
+
+        data = {"A": {"B": {"C": [1, 2, 3]}}}
+        assert mapper._navigate_path(data, "A.B.C") == [1, 2, 3]
+        assert mapper._navigate_path(data, "A.B") == {"C": [1, 2, 3]}
+        assert mapper._navigate_path(data, "A") == {"B": {"C": [1, 2, 3]}}
+
+    def test_navigate_path_missing(self):
+        """Missing path segment returns None."""
+        cfg = SiphonConfig.model_validate(_config_dict([_field("x")]))
+        mapper = Mapper(cfg)
+
+        data = {"A": {"B": 42}}
+        assert mapper._navigate_path(data, "A.X") is None
+        assert mapper._navigate_path(data, "Z") is None
+        assert mapper._navigate_path(data, "A.B.C") is None  # 42 is not a dict
+
+    def test_parent_context_available_in_transforms(self):
+        """Transform args can reference parent record fields via merged context."""
+        def combine(note_text, case_code):
+            return f"[{case_code}] {note_text}"
+
+        cfg = SiphonConfig.model_validate(_collection_config_dict(
+            fields=[_parent_field("case_code", source="CaseCode")],
+            collections=[
+                {
+                    "name": "case_notes",
+                    "source_path": "CaseNotes.CaseNote",
+                    "fields": [
+                        _note_field("note", source="CaseNote", transform={
+                            "type": "custom",
+                            "function": "combine",
+                            "args": ["CaseNote", "CaseCode"],
+                        }),
+                    ],
+                }
+            ],
+        ))
+        mapper = Mapper(cfg, custom_transforms={"combine": combine})
+        result = mapper.map_collections(self.SOURCE_RECORD, {})
+
+        # CaseCode comes from parent context; CaseNote from the item
+        assert result["case_notes"][0]["note"] == "[abc-123] First note"
+        assert result["case_notes"][1]["note"] == "[abc-123] Second note"
