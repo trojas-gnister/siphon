@@ -57,7 +57,7 @@ schema:
 - PostgreSQL: `insert().on_conflict_do_update()`
 - SQLite: `insert().prefix_with("OR REPLACE")`
 - MySQL: `insert().on_duplicate_key_update()`
-- Fallback: select-then-update for unsupported dialects
+- Fallback: select-then-update for unsupported dialects (non-atomic — race condition possible if concurrent writers exist; warn users in docs)
 
 ### Relationship to Existing Dedup
 
