@@ -37,6 +37,7 @@ class PipelineResult:
     invalid_records: list[dict] = field(default_factory=list)
     duplicate_records: list[dict] = field(default_factory=list)
     dry_run: bool = False
+    diff: dict | None = None
 
 
 class Pipeline:

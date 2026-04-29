@@ -566,3 +566,19 @@ class TestDataInDB:
             await engine.dispose()
 
         assert names == ["Acme Corp", "Globex Inc"]
+
+
+class TestPipelineResultDiffField:
+    def test_default_diff_is_none(self):
+        from siphon.core.pipeline import PipelineResult
+        result = PipelineResult()
+        assert result.diff is None
+
+    def test_diff_field_stores_dict(self):
+        from siphon.core.pipeline import PipelineResult
+        result = PipelineResult(diff={
+            "insert": [], "update": [], "skip": [], "no_change": []
+        })
+        assert result.diff == {
+            "insert": [], "update": [], "skip": [], "no_change": []
+        }
