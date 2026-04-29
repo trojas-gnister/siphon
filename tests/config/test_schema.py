@@ -970,3 +970,64 @@ class TestSiphonConfig:
         cfg = SiphonConfig.model_validate(data)
         assert len(cfg.schema_.collections) == 1
         assert cfg.schema_.collections[0].name == "notes"
+
+
+# ---------------------------------------------------------------------------
+# OnConflictConfig
+# ---------------------------------------------------------------------------
+
+
+class TestOnConflictConfig:
+    def test_default_action_is_error(self):
+        from siphon.config.schema import OnConflictConfig
+        cfg = OnConflictConfig(key=["name"])
+        assert cfg.action == "error"
+        assert cfg.update_columns == "all"
+
+    def test_action_update(self):
+        from siphon.config.schema import OnConflictConfig
+        cfg = OnConflictConfig(key=["name"], action="update")
+        assert cfg.action == "update"
+
+    def test_action_skip(self):
+        from siphon.config.schema import OnConflictConfig
+        cfg = OnConflictConfig(key=["name"], action="skip")
+        assert cfg.action == "skip"
+
+    def test_invalid_action_rejected(self):
+        from pydantic import ValidationError
+        from siphon.config.schema import OnConflictConfig
+        with pytest.raises(ValidationError):
+            OnConflictConfig(key=["name"], action="merge")
+
+    def test_composite_key(self):
+        from siphon.config.schema import OnConflictConfig
+        cfg = OnConflictConfig(key=["name", "country_code"])
+        assert cfg.key == ["name", "country_code"]
+
+    def test_empty_key_rejected(self):
+        from pydantic import ValidationError
+        from siphon.config.schema import OnConflictConfig
+        with pytest.raises(ValidationError):
+            OnConflictConfig(key=[])
+
+    def test_update_columns_specific_list(self):
+        from siphon.config.schema import OnConflictConfig
+        cfg = OnConflictConfig(key=["name"], action="update",
+                               update_columns=["phone", "website"])
+        assert cfg.update_columns == ["phone", "website"]
+
+    def test_table_config_with_on_conflict(self):
+        from siphon.config.schema import TableConfig, PrimaryKeyConfig, OnConflictConfig
+        tc = TableConfig(
+            primary_key=PrimaryKeyConfig(column="id", type="auto_increment"),
+            on_conflict=OnConflictConfig(key=["name"], action="update"),
+        )
+        assert tc.on_conflict.action == "update"
+
+    def test_table_config_without_on_conflict(self):
+        from siphon.config.schema import TableConfig, PrimaryKeyConfig
+        tc = TableConfig(
+            primary_key=PrimaryKeyConfig(column="id", type="auto_increment"),
+        )
+        assert tc.on_conflict is None

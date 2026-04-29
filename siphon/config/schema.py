@@ -134,12 +134,23 @@ class PrimaryKeyConfig(BaseModel):
     type: Literal["auto_increment", "uuid"]
 
 
+class OnConflictConfig(BaseModel):
+    """Conflict resolution strategy for inserts that hit an existing row."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    key: list[str] = Field(min_length=1)  # Field names that form the unique conflict key
+    action: Literal["update", "skip", "error"] = "error"
+    update_columns: Literal["all"] | list[str] = "all"
+
+
 class TableConfig(BaseModel):
     """Configuration for a single database table."""
 
     model_config = ConfigDict(populate_by_name=True)
 
     primary_key: PrimaryKeyConfig
+    on_conflict: OnConflictConfig | None = None
 
 
 class DeduplicationConfig(BaseModel):
