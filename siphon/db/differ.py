@@ -37,9 +37,28 @@ class Differ:
 
     async def compute_diff(self, records: list[dict]) -> dict[str, list]:
         """Compute the per-record diff against the current DB state."""
-        return {
+        result = {
             "insert": [],
             "update": [],
             "skip": [],
             "no_change": [],
         }
+
+        target_table = self._infer_primary_table()
+
+        if target_table is None:
+            return result
+
+        table_cfg = self._config.schema_.tables[target_table]
+
+        if table_cfg.on_conflict is None:
+            result["insert"] = list(records)
+            return result
+
+        return result
+
+    def _infer_primary_table(self) -> str | None:
+        """Return the first table that has at least one mapped field."""
+        for field in self._config.schema_.fields:
+            return field.db.table
+        return None

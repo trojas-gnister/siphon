@@ -60,3 +60,29 @@ class TestDifferConstruction:
         assert result["update"] == []
         assert result["skip"] == []
         assert result["no_change"] == []
+
+
+@pytest.fixture
+async def diff_setup_no_conflict():
+    """Setup without on_conflict — every record is an insert."""
+    config = _make_config()  # no on_conflict
+    engine = DatabaseEngine(config.database)
+    model_gen = ModelGenerator(config)
+    model_gen.generate()
+    await engine.create_tables(model_gen.base)
+    yield config, engine, model_gen
+    await engine.dispose()
+
+
+class TestNoOnConflict:
+    async def test_records_categorized_as_insert(self, diff_setup_no_conflict):
+        config, engine, model_gen = diff_setup_no_conflict
+        differ = Differ(config, engine, model_gen)
+        result = await differ.compute_diff([
+            {"name": "Acme", "phone": "111"},
+            {"name": "Beta", "phone": "222"},
+        ])
+        assert len(result["insert"]) == 2
+        assert result["update"] == []
+        assert result["skip"] == []
+        assert result["no_change"] == []
