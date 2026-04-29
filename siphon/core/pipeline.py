@@ -12,6 +12,7 @@ from siphon.core.mapper import Mapper
 from siphon.core.review_cli import ReviewCLI
 from siphon.core.reviewer import ReviewBatch, ReviewStatus
 from siphon.core.validator import Validator
+from siphon.db.differ import Differ
 from siphon.db.engine import DatabaseEngine
 from siphon.db.inserter import Inserter
 from siphon.db.models import ModelGenerator
@@ -223,11 +224,31 @@ class Pipeline:
             result.duplicate_records = duplicate_records
             valid_records = unique_records
 
-        # 8. If dry_run, return
+        # 8. If dry_run, compute diff then return
         if dry_run:
-            logger.info(
-                "Dry run complete — no database operations performed"
-            )
+            # Compute the diff against current DB state.
+            # Note: this requires a DB connection and the model_gen, but
+            # never writes anything.
+            db_engine = DatabaseEngine(self._config.database)
+            try:
+                model_gen = ModelGenerator(self._config)
+                model_gen.generate()
+                differ = Differ(self._config, db_engine, model_gen)
+                try:
+                    result.diff = await differ.compute_diff(valid_records)
+                except Exception as e:
+                    # If the DB doesn't exist yet (e.g., create_tables=False
+                    # and no DB), fall back to "everything is an insert".
+                    logger.warning("Diff computation failed: %s", e)
+                    result.diff = {
+                        "insert": list(valid_records),
+                        "update": [],
+                        "skip": [],
+                        "no_change": [],
+                    }
+            finally:
+                await db_engine.dispose()
+            logger.info("Dry run complete — no database operations performed")
             return result
 
         if not valid_records:
