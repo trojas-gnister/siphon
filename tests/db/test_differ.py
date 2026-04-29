@@ -86,3 +86,69 @@ class TestNoOnConflict:
         assert result["update"] == []
         assert result["skip"] == []
         assert result["no_change"] == []
+
+
+class TestUpdateVsNoChange:
+    async def test_existing_row_with_changed_values_is_update(self, diff_setup):
+        """An existing row whose values differ should be categorized as 'update'."""
+        from siphon.db.inserter import Inserter
+        config, engine, model_gen = diff_setup
+
+        inserter = Inserter(config, engine, model_gen)
+        await inserter.insert([{"name": "Acme", "phone": "OLD"}])
+
+        differ = Differ(config, engine, model_gen)
+        result = await differ.compute_diff([{"name": "Acme", "phone": "NEW"}])
+
+        assert len(result["update"]) == 1
+        assert result["update"][0]["key"] == {"name": "Acme"}
+        assert result["update"][0]["changes"] == {"phone": {"old": "OLD", "new": "NEW"}}
+        assert result["update"][0]["record"] == {"name": "Acme", "phone": "NEW"}
+        assert result["insert"] == []
+        assert result["no_change"] == []
+
+    async def test_existing_row_with_same_values_is_no_change(self, diff_setup):
+        from siphon.db.inserter import Inserter
+        config, engine, model_gen = diff_setup
+
+        inserter = Inserter(config, engine, model_gen)
+        await inserter.insert([{"name": "Acme", "phone": "111"}])
+
+        differ = Differ(config, engine, model_gen)
+        result = await differ.compute_diff([{"name": "Acme", "phone": "111"}])
+
+        assert len(result["no_change"]) == 1
+        assert result["update"] == []
+        assert result["insert"] == []
+
+    async def test_new_row_is_insert(self, diff_setup):
+        """A row whose key isn't in the DB should be 'insert' even with on_conflict set."""
+        differ = Differ(*diff_setup)
+        result = await differ.compute_diff([{"name": "BrandNew", "phone": "999"}])
+        assert len(result["insert"]) == 1
+        assert result["update"] == []
+        assert result["no_change"] == []
+
+    async def test_multiple_records_categorized_correctly(self, diff_setup):
+        from siphon.db.inserter import Inserter
+        config, engine, model_gen = diff_setup
+
+        inserter = Inserter(config, engine, model_gen)
+        await inserter.insert([
+            {"name": "Existing-Same", "phone": "111"},
+            {"name": "Existing-Changed", "phone": "OLD"},
+        ])
+
+        differ = Differ(config, engine, model_gen)
+        result = await differ.compute_diff([
+            {"name": "Existing-Same", "phone": "111"},
+            {"name": "Existing-Changed", "phone": "NEW"},
+            {"name": "Brand-New", "phone": "222"},
+        ])
+
+        assert len(result["insert"]) == 1
+        assert result["insert"][0]["name"] == "Brand-New"
+        assert len(result["update"]) == 1
+        assert result["update"][0]["record"]["name"] == "Existing-Changed"
+        assert len(result["no_change"]) == 1
+        assert result["no_change"][0]["name"] == "Existing-Same"
