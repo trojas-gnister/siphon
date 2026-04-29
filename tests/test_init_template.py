@@ -200,3 +200,19 @@ class TestPipelineSection:
         pipeline = parsed.get("pipeline", {})
         for key in ("review", "log_level"):
             assert key in pipeline, f"pipeline.{key} missing from parsed template"
+
+
+def test_init_template_includes_on_conflict_example(tmp_path, monkeypatch):
+    """The init template should include a commented on_conflict example."""
+    from typer.testing import CliRunner
+    from siphon.cli import app
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    runner.invoke(app, ["init"], input="y\n")
+
+    content = (tmp_path / "siphon.yaml").read_text()
+    assert "on_conflict" in content
+    assert "action:" in content
+    assert "update" in content
+    assert "skip" in content
+    assert "error" in content

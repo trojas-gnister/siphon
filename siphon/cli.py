@@ -311,6 +311,13 @@ schema:
         column: id
         type: auto_increment  # auto_increment | uuid
 
+      # Conflict resolution (optional) — what to do when a row with the same
+      # unique key already exists in the database.
+      # on_conflict:
+      #   key: [name]              # field names that form the unique key (composite supported)
+      #   action: update           # update | skip | error (default: error)
+      #   update_columns: all      # all | [list of column names to update]
+
   # Deduplication (optional)
   # deduplication:
   #   key: [company_name]       # Fields to match on
