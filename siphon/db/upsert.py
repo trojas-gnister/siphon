@@ -8,14 +8,33 @@ is in use — that detection happens here.
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from typing import Any
 
-from sqlalchemy import Table, literal_column
+from sqlalchemy import Table, insert as sa_insert, literal_column
 from sqlalchemy.dialects.mysql import insert as mysql_insert
 from sqlalchemy.dialects.postgresql import insert as postgres_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 logger = logging.getLogger("siphon")
+
+
+@dataclass
+class GenericUpsertPlan:
+    """Plan for a select-then-update upsert.
+
+    Used for dialects that have no native upsert. The Inserter executes
+    this in two steps: SELECT to check existence, then INSERT or UPDATE.
+
+    NOT atomic — there is a race condition window between the SELECT and
+    the subsequent INSERT/UPDATE. Concurrent writers may both see "no row"
+    and both INSERT, causing a unique constraint violation.
+    """
+    table: Table
+    row: dict[str, Any]
+    conflict_key: list[str]
+    action: str
+    update_columns: str | list[str]
 
 
 def detect_dialect(database_url: str) -> str:
@@ -61,7 +80,9 @@ def build_upsert_statement(
         return _build_postgres_upsert(table, row, conflict_key, action, update_columns)
     if dialect == "mysql":
         return _build_mysql_upsert(table, row, conflict_key, action, update_columns)
-    raise NotImplementedError(f"Upsert not yet supported for dialect: {dialect}")
+    if dialect == "generic":
+        return _build_generic_upsert(table, row, conflict_key, action, update_columns)
+    raise NotImplementedError(f"Unknown dialect: {dialect}")
 
 
 def _build_sqlite_upsert(
@@ -169,3 +190,26 @@ def _build_mysql_upsert(
         }
 
     return stmt.on_duplicate_key_update(**update_set)
+
+
+def _build_generic_upsert(
+    table: Table,
+    row: dict[str, Any],
+    conflict_key: list[str],
+    action: str,
+    update_columns: str | list[str],
+):
+    if action == "error":
+        return sa_insert(table).values(**row)
+
+    logger.warning(
+        "Using non-atomic select-then-update upsert fallback. "
+        "Concurrent writers may cause unique constraint violations."
+    )
+    return GenericUpsertPlan(
+        table=table,
+        row=row,
+        conflict_key=conflict_key,
+        action=action,
+        update_columns=update_columns,
+    )

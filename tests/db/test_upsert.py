@@ -227,3 +227,54 @@ class TestBuildUpsertMySQL:
         compiled = str(stmt.compile(dialect=mysql.dialect()))
         assert "ON DUPLICATE KEY UPDATE" in compiled
         assert "name = name" in compiled or "name=name" in compiled
+
+
+class TestBuildUpsertGeneric:
+    def test_action_error_returns_plain_insert(self):
+        from siphon.db.upsert import build_upsert_statement
+        table = _make_table()
+        stmt = build_upsert_statement(
+            dialect="generic",
+            table=table,
+            row={"name": "Acme"},
+            conflict_key=["name"],
+            action="error",
+            update_columns="all",
+        )
+        compiled = str(stmt.compile(compile_kwargs={"literal_binds": True}))
+        assert "INSERT INTO companies" in compiled
+        assert "ON CONFLICT" not in compiled
+        assert "ON DUPLICATE KEY" not in compiled
+
+    def test_action_update_returns_marker_for_caller(self):
+        """Generic fallback returns a special object signalling 'use select-then-update'."""
+        from siphon.db.upsert import build_upsert_statement, GenericUpsertPlan
+        table = _make_table()
+        plan = build_upsert_statement(
+            dialect="generic",
+            table=table,
+            row={"name": "Acme", "phone": "555"},
+            conflict_key=["name"],
+            action="update",
+            update_columns="all",
+        )
+        assert isinstance(plan, GenericUpsertPlan)
+        assert plan.action == "update"
+        assert plan.conflict_key == ["name"]
+        assert plan.row == {"name": "Acme", "phone": "555"}
+        assert plan.update_columns == "all"
+        assert plan.table is table
+
+    def test_action_skip_returns_marker(self):
+        from siphon.db.upsert import build_upsert_statement, GenericUpsertPlan
+        table = _make_table()
+        plan = build_upsert_statement(
+            dialect="generic",
+            table=table,
+            row={"name": "Acme"},
+            conflict_key=["name"],
+            action="skip",
+            update_columns="all",
+        )
+        assert isinstance(plan, GenericUpsertPlan)
+        assert plan.action == "skip"
