@@ -11,6 +11,7 @@ import logging
 from typing import Any
 
 from sqlalchemy import Table
+from sqlalchemy.dialects.postgresql import insert as postgres_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 logger = logging.getLogger("siphon")
@@ -55,6 +56,8 @@ def build_upsert_statement(
     """
     if dialect == "sqlite":
         return _build_sqlite_upsert(table, row, conflict_key, action, update_columns)
+    if dialect == "postgresql":
+        return _build_postgres_upsert(table, row, conflict_key, action, update_columns)
     raise NotImplementedError(f"Upsert not yet supported for dialect: {dialect}")
 
 
@@ -66,6 +69,43 @@ def _build_sqlite_upsert(
     update_columns: str | list[str],
 ):
     stmt = sqlite_insert(table).values(**row)
+
+    if action == "error":
+        return stmt
+
+    if action == "skip":
+        return stmt.on_conflict_do_nothing(index_elements=conflict_key)
+
+    if update_columns == "all":
+        update_set = {
+            col.name: stmt.excluded[col.name]
+            for col in table.columns
+            if col.name not in conflict_key and col.name in row
+        }
+    else:
+        update_set = {
+            col_name: stmt.excluded[col_name]
+            for col_name in update_columns
+            if col_name in row
+        }
+
+    if not update_set:
+        return stmt.on_conflict_do_nothing(index_elements=conflict_key)
+
+    return stmt.on_conflict_do_update(
+        index_elements=conflict_key,
+        set_=update_set,
+    )
+
+
+def _build_postgres_upsert(
+    table: Table,
+    row: dict[str, Any],
+    conflict_key: list[str],
+    action: str,
+    update_columns: str | list[str],
+):
+    stmt = postgres_insert(table).values(**row)
 
     if action == "error":
         return stmt

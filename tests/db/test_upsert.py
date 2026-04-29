@@ -111,3 +111,51 @@ class TestBuildUpsertSQLite:
         )
         compiled = str(stmt.compile(compile_kwargs={"literal_binds": True}))
         assert "ON CONFLICT (name, phone)" in compiled
+
+
+class TestBuildUpsertPostgres:
+    def test_action_update_all_columns(self):
+        from siphon.db.upsert import build_upsert_statement
+        table = _make_table()
+        stmt = build_upsert_statement(
+            dialect="postgresql",
+            table=table,
+            row={"name": "Acme", "phone": "555", "website": "acme.com"},
+            conflict_key=["name"],
+            action="update",
+            update_columns="all",
+        )
+        from sqlalchemy.dialects import postgresql
+        compiled = str(stmt.compile(dialect=postgresql.dialect()))
+        assert "INSERT INTO companies" in compiled
+        assert "ON CONFLICT (name) DO UPDATE" in compiled
+
+    def test_action_skip(self):
+        from siphon.db.upsert import build_upsert_statement
+        table = _make_table()
+        stmt = build_upsert_statement(
+            dialect="postgresql",
+            table=table,
+            row={"name": "Acme"},
+            conflict_key=["name"],
+            action="skip",
+            update_columns="all",
+        )
+        from sqlalchemy.dialects import postgresql
+        compiled = str(stmt.compile(dialect=postgresql.dialect()))
+        assert "ON CONFLICT (name) DO NOTHING" in compiled
+
+    def test_action_error_returns_plain_insert(self):
+        from siphon.db.upsert import build_upsert_statement
+        table = _make_table()
+        stmt = build_upsert_statement(
+            dialect="postgresql",
+            table=table,
+            row={"name": "Acme"},
+            conflict_key=["name"],
+            action="error",
+            update_columns="all",
+        )
+        from sqlalchemy.dialects import postgresql
+        compiled = str(stmt.compile(dialect=postgresql.dialect()))
+        assert "ON CONFLICT" not in compiled
