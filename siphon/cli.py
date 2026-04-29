@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
 from typing import Optional
 
@@ -51,6 +52,7 @@ def run(
     dry_run: bool = typer.Option(False, "--dry-run", help="Extract + validate only, no DB insertion"),
     no_review: bool = typer.Option(False, "--no-review", help="Skip HITL review, insert directly"),
     sheet: Optional[str] = typer.Option(None, "--sheet", help="Sheet name or index for multi-sheet Excel"),
+    output: str = typer.Option("table", "--output", help="Output format: table | json"),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Set log level to debug"),
     quiet: bool = typer.Option(False, "--quiet", "-q", help="Set log level to error only"),
 ) -> None:
@@ -75,7 +77,10 @@ def run(
             )
         )
 
-        _print_summary(result)
+        if output == "json":
+            _print_json(result)
+        else:
+            _print_summary(result)
 
     except SiphonError as e:
         console.print(f"[red]Error:[/red] {e}")
@@ -395,6 +400,49 @@ def _print_summary(result: PipelineResult) -> None:
         table.add_row("Skipped Chunks", str(len(result.skipped_chunks)))
 
     console.print(table)
+
+    if result.diff is not None:
+        _print_diff(result.diff)
+
+
+def _print_diff(diff: dict) -> None:
+    """Print the dry-run diff as a Rich table."""
+    table = Table(title="Pipeline Diff (dry run)")
+    table.add_column("Action", style="bold")
+    table.add_column("Count", justify="right")
+
+    table.add_row("Insert", str(len(diff.get("insert", []))))
+    table.add_row("Update", str(len(diff.get("update", []))))
+    table.add_row("Skip", str(len(diff.get("skip", []))))
+    table.add_row("No Change", str(len(diff.get("no_change", []))))
+
+    console.print(table)
+
+    updates = diff.get("update", [])
+    if updates:
+        console.print("[bold]Updates:[/bold]")
+        for u in updates[:20]:
+            key_str = ", ".join(f"{k}={v!r}" for k, v in u["key"].items())
+            for col, change in u["changes"].items():
+                console.print(
+                    f"  {key_str} → {col}: {change['old']!r} → {change['new']!r}"
+                )
+        if len(updates) > 20:
+            console.print(f"  ... and {len(updates) - 20} more")
+
+
+def _print_json(result: PipelineResult) -> None:
+    """Print the pipeline result as JSON for scripting/CI."""
+    from dataclasses import asdict
+
+    def _json_default(o):
+        try:
+            return str(o)
+        except Exception:
+            return repr(o)
+
+    payload = asdict(result)
+    print(json.dumps(payload, default=_json_default, indent=2))
 
 
 if __name__ == "__main__":
