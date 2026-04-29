@@ -62,3 +62,48 @@ class TestActionError:
 
         with pytest.raises(DatabaseError):
             await inserter.insert([{"name": "Acme", "phone": "222"}])
+
+
+@pytest.fixture
+async def db_setup_with_skip():
+    """DB setup with on_conflict.action=skip configured."""
+    config = _make_config({
+        "key": ["name"],
+        "action": "skip",
+    })
+    engine = DatabaseEngine(config.database)
+    model_gen = ModelGenerator(config)
+    model_gen.generate()
+    from sqlalchemy import UniqueConstraint
+    table = model_gen.models["companies"].__table__
+    table.append_constraint(UniqueConstraint("name", name="uq_companies_name"))
+    await engine.create_tables(model_gen.base)
+    yield config, engine, model_gen
+    await engine.dispose()
+
+
+class TestActionSkip:
+    async def test_skip_does_not_raise(self, db_setup_with_skip):
+        """With action=skip, duplicate inserts are silently ignored."""
+        config, engine, model_gen = db_setup_with_skip
+        inserter = Inserter(config, engine, model_gen)
+
+        await inserter.insert([{"name": "Acme", "phone": "111"}])
+        await inserter.insert([{"name": "Acme", "phone": "222"}])
+
+    async def test_skip_preserves_original_row(self, db_setup_with_skip):
+        """The original row's values are unchanged after skip."""
+        from sqlalchemy import select
+        config, engine, model_gen = db_setup_with_skip
+        inserter = Inserter(config, engine, model_gen)
+
+        await inserter.insert([{"name": "Acme", "phone": "ORIGINAL"}])
+        await inserter.insert([{"name": "Acme", "phone": "NEW"}])
+
+        async with engine.session() as session:
+            result = await session.execute(
+                select(model_gen.models["companies"].phone)
+            )
+            phones = [r[0] for r in result]
+
+        assert phones == ["ORIGINAL"]

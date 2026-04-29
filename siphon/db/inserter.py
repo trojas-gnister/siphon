@@ -9,6 +9,11 @@ from sqlalchemy import select
 from siphon.config.schema import BelongsToRelationship, JunctionRelationship, SiphonConfig
 from siphon.db.engine import DatabaseEngine
 from siphon.db.models import ModelGenerator
+from siphon.db.upsert import (
+    GenericUpsertPlan,
+    build_upsert_statement,
+    detect_dialect,
+)
 from siphon.utils.errors import DatabaseError
 
 logger = logging.getLogger("siphon")
@@ -36,6 +41,7 @@ class Inserter:
         self._db = db_engine
         self._models = model_generator.models
         self._generator = model_generator
+        self._dialect = detect_dialect(config.database.url)
 
         # Lookup cache: {table_name: {resolve_by_value: pk_value}}
         self._lookup_cache: dict[str, dict[str, any]] = defaultdict(dict)
@@ -223,13 +229,19 @@ class Inserter:
                             if not row_data and pk_config.type == "auto_increment":
                                 continue
 
-                            # Insert
-                            instance = model(**row_data)
-                            session.add(instance)
-                            await session.flush()
+                            table_cfg = self._config.schema_.tables[table_name]
+                            if table_cfg.on_conflict is None or table_cfg.on_conflict.action == "error":
+                                # No upsert configured (or action=error) — use ORM insert as before
+                                instance = model(**row_data)
+                                session.add(instance)
+                                await session.flush()
+                                pk_value = getattr(instance, pk_config.column)
+                            else:
+                                # Upsert path
+                                pk_value = await self._execute_upsert(
+                                    session, model, table_name, row_data, pk_config, table_cfg.on_conflict
+                                )
 
-                            # Capture the PK
-                            pk_value = getattr(instance, pk_config.column)
                             record_ids[table_name] = pk_value
 
                             # Update lookup cache for belongs_to resolution
@@ -266,6 +278,102 @@ class Inserter:
 
         logger.info(f"Inserted {inserted_count} records")
         return inserted_count
+
+    async def _execute_upsert(
+        self,
+        session,
+        model,
+        table_name: str,
+        row_data: dict,
+        pk_config,
+        on_conflict_cfg,
+    ):
+        """Execute an upsert statement and return the affected row's PK value."""
+        db_conflict_key = self._field_names_to_columns(on_conflict_cfg.key)
+
+        if on_conflict_cfg.update_columns == "all":
+            db_update_columns = "all"
+        else:
+            db_update_columns = self._field_names_to_columns(on_conflict_cfg.update_columns)
+
+        stmt = build_upsert_statement(
+            dialect=self._dialect,
+            table=model.__table__,
+            row=row_data,
+            conflict_key=db_conflict_key,
+            action=on_conflict_cfg.action,
+            update_columns=db_update_columns,
+        )
+
+        if isinstance(stmt, GenericUpsertPlan):
+            return await self._execute_generic_upsert_plan(session, model, pk_config, stmt)
+
+        await session.execute(stmt)
+        return await self._lookup_pk_by_conflict_key(
+            session, model, pk_config, db_conflict_key, row_data
+        )
+
+    def _field_names_to_columns(self, field_names: list[str]) -> list[str]:
+        """Map schema field names to their DB column names."""
+        name_to_column = {}
+        for f in self._config.schema_.fields:
+            name_to_column[f.name] = f.db.column
+        if self._config.schema_.collections:
+            for coll in self._config.schema_.collections:
+                for f in coll.fields:
+                    name_to_column[f.name] = f.db.column
+        return [name_to_column.get(n, n) for n in field_names]
+
+    async def _lookup_pk_by_conflict_key(
+        self, session, model, pk_config, db_conflict_key, row_data
+    ):
+        """SELECT the PK after an upsert, matching on the conflict key."""
+        from sqlalchemy import select
+        pk_col = getattr(model, pk_config.column)
+        stmt = select(pk_col)
+        for col_name in db_conflict_key:
+            stmt = stmt.where(getattr(model, col_name) == row_data[col_name])
+        result = await session.execute(stmt)
+        return result.scalar_one()
+
+    async def _execute_generic_upsert_plan(self, session, model, pk_config, plan):
+        """Execute a generic select-then-update plan."""
+        from sqlalchemy import select, update as sa_update, insert as sa_insert
+
+        pk_col = getattr(model, pk_config.column)
+        select_stmt = select(pk_col)
+        for col_name in plan.conflict_key:
+            select_stmt = select_stmt.where(
+                getattr(model, col_name) == plan.row[col_name]
+            )
+        existing = (await session.execute(select_stmt)).scalar_one_or_none()
+
+        if existing is None:
+            await session.execute(sa_insert(plan.table).values(**plan.row))
+            return (await session.execute(select_stmt)).scalar_one()
+
+        if plan.action == "skip":
+            return existing
+
+        if plan.update_columns == "all":
+            update_values = {
+                k: v for k, v in plan.row.items()
+                if k not in plan.conflict_key
+            }
+        else:
+            update_values = {
+                k: plan.row[k] for k in plan.update_columns if k in plan.row
+            }
+
+        if update_values:
+            update_stmt = sa_update(plan.table).values(**update_values)
+            for col_name in plan.conflict_key:
+                update_stmt = update_stmt.where(
+                    getattr(model, col_name) == plan.row[col_name]
+                )
+            await session.execute(update_stmt)
+
+        return existing
 
     def generate_sql_preview(self, records: list[dict]) -> list[str]:
         """Generate a preview of SQL INSERT statements (for HITL review).
