@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import uuid
 
-from sqlalchemy import Column, ForeignKey, Integer, String
+from sqlalchemy import Column, ForeignKey, Integer, String, UniqueConstraint
 from sqlalchemy.orm import DeclarativeBase
 
 from siphon.config.schema import (
@@ -120,6 +120,31 @@ class ModelGenerator:
             # FK columns from belongs_to relationships
             for fk_col_name, fk_col in table_fks.get(table_name, {}).items():
                 columns[fk_col_name] = fk_col
+
+            # Add a UniqueConstraint for on_conflict.key so that SQLite/Postgres
+            # can match the ON CONFLICT clause. Field names in on_conflict.key
+            # are mapped to their underlying DB column names here.
+            if table_config.on_conflict is not None:
+                field_to_column = {
+                    f.name: f.db.column for f in self._config.schema_.fields
+                }
+                if self._config.schema_.collections:
+                    for coll in self._config.schema_.collections:
+                        for f in coll.fields:
+                            field_to_column.setdefault(f.name, f.db.column)
+                conflict_columns = [
+                    field_to_column.get(name, name)
+                    for name in table_config.on_conflict.key
+                ]
+                # Skip the constraint when the conflict key is the primary key
+                # (already unique by definition).
+                if conflict_columns != [pk.column]:
+                    columns["__table_args__"] = (
+                        UniqueConstraint(
+                            *conflict_columns,
+                            name=f"uq_{table_name}_{'_'.join(conflict_columns)}",
+                        ),
+                    )
 
             # Create ORM class dynamically
             class_name = table_name.title().replace("_", "")

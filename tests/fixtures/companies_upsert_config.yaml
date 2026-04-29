@@ -1,0 +1,35 @@
+name: companies-upsert-test
+
+source:
+  type: spreadsheet
+
+database:
+  url: "sqlite+aiosqlite://"  # overridden in test
+
+schema:
+  fields:
+    - name: company_name
+      source: "Name"
+      type: string
+      required: true
+      db: { table: companies, column: name }
+    - name: phone
+      source: "Phone"
+      type: phone
+      db: { table: companies, column: phone_number }
+    - name: website
+      source: "Website"
+      type: url
+      db: { table: companies, column: website_url }
+
+  tables:
+    companies:
+      primary_key: { column: id, type: auto_increment }
+      on_conflict:
+        key: [company_name]
+        action: update
+        update_columns: all
+
+pipeline:
+  review: false
+  log_level: info
