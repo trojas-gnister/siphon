@@ -87,6 +87,33 @@ All 14 supported field types:
 **Enum presets:** `us_states` (US states and territories), `ca_provinces` (Canadian provinces and territories).
 
 
+## Upserts
+
+By default, inserting a row that conflicts with an existing unique key raises an error. To enable insert-or-update behavior, declare an `on_conflict` policy on a table:
+
+```yaml
+schema:
+  tables:
+    companies:
+      primary_key: { column: id, type: auto_increment }
+      on_conflict:
+        key: [name]              # field names that form the unique conflict key
+        action: update           # update | skip | error (default: error)
+        update_columns: all      # all | [list of column names]
+```
+
+**Actions:**
+- `update` — update the existing row with new values (true upsert)
+- `skip` — silently keep the existing row, ignore the new one
+- `error` — fail the transaction (default)
+
+**Composite keys:** `key` accepts multiple field names. All must match for a row to be considered a conflict.
+
+**Selective updates:** `update_columns` defaults to `all` (every non-key column). Provide a list to update only specific columns; others are preserved from the existing row.
+
+**Database support:** Native upserts on PostgreSQL, MySQL, MariaDB, and SQLite (3.24+). For other dialects, Siphon falls back to a non-atomic select-then-update path — concurrent writers may cause unique constraint violations on the fallback path.
+
+
 ## Transforms
 
 Built-in transforms can be applied inline on any field:
