@@ -152,3 +152,37 @@ class TestUpdateVsNoChange:
         assert result["update"][0]["record"]["name"] == "Existing-Changed"
         assert len(result["no_change"]) == 1
         assert result["no_change"][0]["name"] == "Existing-Same"
+
+
+@pytest.fixture
+async def diff_setup_skip():
+    """Setup with action=skip."""
+    config = _make_config({"key": ["name"], "action": "skip"})
+    engine = DatabaseEngine(config.database)
+    model_gen = ModelGenerator(config)
+    model_gen.generate()
+    await engine.create_tables(model_gen.base)
+    yield config, engine, model_gen
+    await engine.dispose()
+
+
+class TestActionSkipCategory:
+    async def test_existing_row_categorized_as_skip(self, diff_setup_skip):
+        from siphon.db.inserter import Inserter
+        config, engine, model_gen = diff_setup_skip
+
+        inserter = Inserter(config, engine, model_gen)
+        await inserter.insert([{"name": "Acme", "phone": "OLD"}])
+
+        differ = Differ(config, engine, model_gen)
+        result = await differ.compute_diff([{"name": "Acme", "phone": "NEW"}])
+
+        assert len(result["skip"]) == 1
+        assert result["update"] == []
+        assert result["no_change"] == []
+
+    async def test_new_row_with_action_skip_is_insert(self, diff_setup_skip):
+        differ = Differ(*diff_setup_skip)
+        result = await differ.compute_diff([{"name": "Acme", "phone": "111"}])
+        assert len(result["insert"]) == 1
+        assert result["skip"] == []
