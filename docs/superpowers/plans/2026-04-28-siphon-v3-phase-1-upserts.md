@@ -2090,7 +2090,7 @@ After all tasks complete:
 2. **Coverage maintained:** `.venv/bin/pytest tests/ --cov=siphon` shows ≥95% coverage.
 3. **Smoke test:** Manually run `siphon validate --config tests/fixtures/companies_upsert_config.yaml` and confirm "Config is valid".
 4. **Branch pushed:** `v3-phase-1-upserts` exists on the remote.
-5. **No proprietary references:** `grep -ri "workshield\|work.shield" --include="*.py" --include="*.yaml" --include="*.md"` returns no matches.
+5. **No proprietary references:** Audit the codebase to ensure no proprietary client/company names appear in code, configs, or docs.
 
 ## Out of Scope
 
