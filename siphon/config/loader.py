@@ -106,6 +106,23 @@ def _cross_validate(config: SiphonConfig) -> None:
             for field in collection.fields:
                 _validate_field(field, config, context=f"In collection '{collection.name}', ")
 
+    # Validate on_conflict.key references known field names
+    known_field_names = {f.name for f in config.schema_.fields}
+    if config.schema_.collections:
+        for collection in config.schema_.collections:
+            for field in collection.fields:
+                known_field_names.add(field.name)
+
+    for table_name, table_cfg in config.schema_.tables.items():
+        if table_cfg.on_conflict is None:
+            continue
+        for key_field in table_cfg.on_conflict.key:
+            if key_field not in known_field_names:
+                raise ConfigError(
+                    f"Table '{table_name}' on_conflict.key references unknown "
+                    f"field '{key_field}'. Known fields: {sorted(known_field_names)}"
+                )
+
 
 def load_config(path: str | Path) -> SiphonConfig:
     """Load and validate a Siphon YAML config file.

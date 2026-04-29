@@ -769,3 +769,53 @@ def test_missing_file_raises_config_error(tmp_path):
     """Passing a path that does not exist raises ConfigError."""
     with pytest.raises(ConfigError):
         load_config(tmp_path / "nonexistent.yaml")
+
+
+def test_on_conflict_key_unknown_field_raises(tmp_path):
+    config_yaml = """
+name: test-pipeline
+source: { type: spreadsheet }
+database: { url: "sqlite:///t.db" }
+schema:
+  fields:
+    - name: company_name
+      source: "Name"
+      type: string
+      db: { table: companies, column: name }
+  tables:
+    companies:
+      primary_key: { column: id, type: auto_increment }
+      on_conflict:
+        key: [nonexistent_field]
+        action: update
+pipeline: { review: false }
+"""
+    p = tmp_path / "siphon.yaml"
+    p.write_text(config_yaml)
+    with pytest.raises(ConfigError, match="on_conflict.*nonexistent_field"):
+        load_config(p)
+
+
+def test_on_conflict_key_valid_field_loads(tmp_path):
+    config_yaml = """
+name: test-pipeline
+source: { type: spreadsheet }
+database: { url: "sqlite:///t.db" }
+schema:
+  fields:
+    - name: company_name
+      source: "Name"
+      type: string
+      db: { table: companies, column: name }
+  tables:
+    companies:
+      primary_key: { column: id, type: auto_increment }
+      on_conflict:
+        key: [company_name]
+        action: update
+pipeline: { review: false }
+"""
+    p = tmp_path / "siphon.yaml"
+    p.write_text(config_yaml)
+    cfg = load_config(p)
+    assert cfg.schema_.tables["companies"].on_conflict.action == "update"
