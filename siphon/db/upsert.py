@@ -10,7 +10,8 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from sqlalchemy import Table
+from sqlalchemy import Table, literal_column
+from sqlalchemy.dialects.mysql import insert as mysql_insert
 from sqlalchemy.dialects.postgresql import insert as postgres_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
@@ -58,6 +59,8 @@ def build_upsert_statement(
         return _build_sqlite_upsert(table, row, conflict_key, action, update_columns)
     if dialect == "postgresql":
         return _build_postgres_upsert(table, row, conflict_key, action, update_columns)
+    if dialect == "mysql":
+        return _build_mysql_upsert(table, row, conflict_key, action, update_columns)
     raise NotImplementedError(f"Upsert not yet supported for dialect: {dialect}")
 
 
@@ -133,3 +136,36 @@ def _build_postgres_upsert(
         index_elements=conflict_key,
         set_=update_set,
     )
+
+
+def _build_mysql_upsert(
+    table: Table,
+    row: dict[str, Any],
+    conflict_key: list[str],
+    action: str,
+    update_columns: str | list[str],
+):
+    stmt = mysql_insert(table).values(**row)
+
+    if action == "error":
+        return stmt
+
+    if action == "skip":
+        # MySQL has no DO NOTHING; no-op by setting first conflict key column to itself.
+        first_key = conflict_key[0]
+        return stmt.on_duplicate_key_update(**{first_key: literal_column(first_key)})
+
+    if update_columns == "all":
+        update_set = {
+            col.name: getattr(stmt.inserted, col.name)
+            for col in table.columns
+            if col.name not in conflict_key and col.name in row
+        }
+    else:
+        update_set = {
+            col_name: getattr(stmt.inserted, col_name)
+            for col_name in update_columns
+            if col_name in row
+        }
+
+    return stmt.on_duplicate_key_update(**update_set)

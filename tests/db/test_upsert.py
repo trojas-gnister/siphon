@@ -159,3 +159,71 @@ class TestBuildUpsertPostgres:
         from sqlalchemy.dialects import postgresql
         compiled = str(stmt.compile(dialect=postgresql.dialect()))
         assert "ON CONFLICT" not in compiled
+
+
+class TestBuildUpsertMySQL:
+    def test_action_update_all_columns(self):
+        from siphon.db.upsert import build_upsert_statement
+        table = _make_table()
+        stmt = build_upsert_statement(
+            dialect="mysql",
+            table=table,
+            row={"name": "Acme", "phone": "555", "website": "acme.com"},
+            conflict_key=["name"],
+            action="update",
+            update_columns="all",
+        )
+        from sqlalchemy.dialects import mysql
+        compiled = str(stmt.compile(dialect=mysql.dialect()))
+        assert "INSERT INTO companies" in compiled
+        assert "ON DUPLICATE KEY UPDATE" in compiled
+
+    def test_action_update_specific_columns(self):
+        from siphon.db.upsert import build_upsert_statement
+        table = _make_table()
+        stmt = build_upsert_statement(
+            dialect="mysql",
+            table=table,
+            row={"name": "Acme", "phone": "555", "website": "acme.com"},
+            conflict_key=["name"],
+            action="update",
+            update_columns=["phone"],
+        )
+        from sqlalchemy.dialects import mysql
+        compiled = str(stmt.compile(dialect=mysql.dialect()))
+        assert "ON DUPLICATE KEY UPDATE" in compiled
+        update_part = compiled.split("ON DUPLICATE KEY UPDATE")[1]
+        assert "phone" in update_part
+        assert "website" not in update_part
+
+    def test_action_error_returns_plain_insert(self):
+        from siphon.db.upsert import build_upsert_statement
+        table = _make_table()
+        stmt = build_upsert_statement(
+            dialect="mysql",
+            table=table,
+            row={"name": "Acme"},
+            conflict_key=["name"],
+            action="error",
+            update_columns="all",
+        )
+        from sqlalchemy.dialects import mysql
+        compiled = str(stmt.compile(dialect=mysql.dialect()))
+        assert "ON DUPLICATE KEY" not in compiled
+
+    def test_action_skip_uses_no_op_update(self):
+        """MySQL has no DO NOTHING; emulate by setting a column to itself."""
+        from siphon.db.upsert import build_upsert_statement
+        table = _make_table()
+        stmt = build_upsert_statement(
+            dialect="mysql",
+            table=table,
+            row={"name": "Acme"},
+            conflict_key=["name"],
+            action="skip",
+            update_columns="all",
+        )
+        from sqlalchemy.dialects import mysql
+        compiled = str(stmt.compile(dialect=mysql.dialect()))
+        assert "ON DUPLICATE KEY UPDATE" in compiled
+        assert "name = name" in compiled or "name=name" in compiled
