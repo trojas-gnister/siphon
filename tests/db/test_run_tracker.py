@@ -108,3 +108,75 @@ class TestRunLifecycle:
         assert run.status == "failed"
         assert run.error_message == "boom"
         assert run.completed_at is not None
+
+
+class TestFindResumableRun:
+    async def test_no_failed_run_returns_none(self, engine_setup):
+        tracker = RunTracker(engine_setup)
+        await tracker.create_runs_table()
+        result = await tracker.find_resumable_run("p", "/f.csv", "h")
+        assert result is None
+
+    async def test_completed_run_is_not_resumable(self, engine_setup):
+        tracker = RunTracker(engine_setup)
+        await tracker.create_runs_table()
+        run_id = await tracker.start_run("p", "/f.csv", 10, "h")
+        await tracker.complete_run(run_id)
+        result = await tracker.find_resumable_run("p", "/f.csv", "h")
+        assert result is None
+
+    async def test_failed_run_is_resumable(self, engine_setup):
+        tracker = RunTracker(engine_setup)
+        await tracker.create_runs_table()
+        run_id = await tracker.start_run("p", "/f.csv", 10, "h")
+        await tracker.update_progress(run_id, 4)
+        await tracker.fail_run(run_id, "boom")
+
+        result = await tracker.find_resumable_run("p", "/f.csv", "h")
+        assert result is not None
+        assert result.id == run_id
+        assert result.processed_count == 4
+
+    async def test_different_pipeline_name_not_resumable(self, engine_setup):
+        tracker = RunTracker(engine_setup)
+        await tracker.create_runs_table()
+        run_id = await tracker.start_run("p1", "/f.csv", 10, "h")
+        await tracker.fail_run(run_id, "boom")
+
+        result = await tracker.find_resumable_run("p2", "/f.csv", "h")
+        assert result is None
+
+    async def test_different_source_file_not_resumable(self, engine_setup):
+        tracker = RunTracker(engine_setup)
+        await tracker.create_runs_table()
+        run_id = await tracker.start_run("p", "/f1.csv", 10, "h")
+        await tracker.fail_run(run_id, "boom")
+
+        result = await tracker.find_resumable_run("p", "/f2.csv", "h")
+        assert result is None
+
+    async def test_different_config_hash_not_resumable(self, engine_setup):
+        tracker = RunTracker(engine_setup)
+        await tracker.create_runs_table()
+        run_id = await tracker.start_run("p", "/f.csv", 10, "h1")
+        await tracker.fail_run(run_id, "boom")
+
+        result = await tracker.find_resumable_run("p", "/f.csv", "h2")
+        assert result is None
+
+    async def test_returns_most_recent_failed_run(self, engine_setup):
+        """If multiple failed runs exist, return the most recent."""
+        tracker = RunTracker(engine_setup)
+        await tracker.create_runs_table()
+
+        first_id = await tracker.start_run("p", "/f.csv", 10, "h")
+        await tracker.update_progress(first_id, 2)
+        await tracker.fail_run(first_id, "first")
+
+        second_id = await tracker.start_run("p", "/f.csv", 10, "h")
+        await tracker.update_progress(second_id, 5)
+        await tracker.fail_run(second_id, "second")
+
+        result = await tracker.find_resumable_run("p", "/f.csv", "h")
+        assert result.id == second_id
+        assert result.processed_count == 5

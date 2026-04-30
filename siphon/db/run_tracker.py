@@ -132,3 +132,24 @@ class RunTracker:
                 select(SiphonRun).where(SiphonRun.id == run_id)
             )
             return result.scalar_one_or_none()
+
+    async def find_resumable_run(
+        self,
+        pipeline_name: str,
+        source_file: str,
+        config_hash: str,
+    ) -> SiphonRun | None:
+        """Return the most recent failed run for this pipeline+source+config, or None."""
+        from sqlalchemy import select
+
+        async with self._db.session() as session:
+            result = await session.execute(
+                select(SiphonRun)
+                .where(SiphonRun.pipeline_name == pipeline_name)
+                .where(SiphonRun.source_file == source_file)
+                .where(SiphonRun.config_hash == config_hash)
+                .where(SiphonRun.status == "failed")
+                .order_by(SiphonRun.id.desc())
+                .limit(1)
+            )
+            return result.scalar_one_or_none()
