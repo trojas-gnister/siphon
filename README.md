@@ -114,6 +114,41 @@ schema:
 **Database support:** Native upserts on PostgreSQL, MySQL, MariaDB, and SQLite (3.24+). For other dialects, Siphon falls back to a non-atomic select-then-update path — concurrent writers may cause unique constraint violations on the fallback path.
 
 
+## Dry-Run with Diff
+
+When you run `siphon run --dry-run`, Siphon shows what *would* change before committing anything to the database:
+
+```
+Pipeline Diff (dry run)
+┌──────────┬───────┐
+│ Action   │ Count │
+├──────────┼───────┤
+│ Insert   │     5 │
+│ Update   │     3 │
+│ Skip     │     0 │
+│ No Change│     1 │
+└──────────┴───────┘
+
+Updates:
+  name='Acme Corp' → phone: '(555) 123-4567' → '(555) 999-8888'
+  name='Beta Inc'  → website_url: 'http://beta.io' → 'http://beta.com'
+```
+
+**Categories:**
+- `Insert` — new rows that would be added
+- `Update` — existing rows whose values would change
+- `Skip` — existing rows that would be skipped (when `on_conflict.action: skip`)
+- `No Change` — rows that already match the database
+
+For scripting, use `--output json` to get machine-readable output:
+
+```bash
+siphon run data.csv --dry-run --output json
+```
+
+The diff respects the `on_conflict.key` declared on each table. If no `on_conflict` is configured, every record is categorized as `Insert`.
+
+
 ## Transforms
 
 Built-in transforms can be applied inline on any field:
