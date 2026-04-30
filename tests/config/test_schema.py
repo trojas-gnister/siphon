@@ -1031,3 +1031,42 @@ class TestOnConflictConfig:
             primary_key=PrimaryKeyConfig(column="id", type="auto_increment"),
         )
         assert tc.on_conflict is None
+
+
+# ---------------------------------------------------------------------------
+# PipelineConfig — batch_size and track_runs
+# ---------------------------------------------------------------------------
+
+
+class TestPipelineConfigBatchAndTracking:
+    def test_default_batch_size(self):
+        from siphon.config.schema import PipelineConfig
+        cfg = PipelineConfig()
+        assert cfg.batch_size == 500
+
+    def test_default_track_runs(self):
+        from siphon.config.schema import PipelineConfig
+        cfg = PipelineConfig()
+        assert cfg.track_runs is True
+
+    def test_custom_batch_size(self):
+        from siphon.config.schema import PipelineConfig
+        cfg = PipelineConfig(batch_size=10)
+        assert cfg.batch_size == 10
+
+    def test_track_runs_disabled(self):
+        from siphon.config.schema import PipelineConfig
+        cfg = PipelineConfig(track_runs=False)
+        assert cfg.track_runs is False
+
+    def test_zero_batch_size_rejected(self):
+        from pydantic import ValidationError
+        from siphon.config.schema import PipelineConfig
+        with pytest.raises(ValidationError):
+            PipelineConfig(batch_size=0)
+
+    def test_negative_batch_size_rejected(self):
+        from pydantic import ValidationError
+        from siphon.config.schema import PipelineConfig
+        with pytest.raises(ValidationError):
+            PipelineConfig(batch_size=-1)

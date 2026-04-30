@@ -244,6 +244,8 @@ class PipelineConfig(BaseModel):
     review: bool = False
     log_level: Literal["debug", "info", "warning", "error"] = "info"
     log_dir: str | None = None
+    batch_size: int = Field(default=500, gt=0)
+    track_runs: bool = True
 
 
 # ---------------------------------------------------------------------------
