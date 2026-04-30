@@ -56,3 +56,79 @@ class RunTracker:
         async with self._db.engine.begin() as conn:
             await conn.run_sync(_RunsBase.metadata.create_all)
         logger.info("Verified _siphon_runs metadata table exists")
+
+    async def start_run(
+        self,
+        pipeline_name: str,
+        source_file: str,
+        total_records: int,
+        config_hash: str,
+    ) -> int:
+        """Insert a new 'running' row and return its id."""
+        async with self._db.session() as session:
+            run = SiphonRun(
+                pipeline_name=pipeline_name,
+                source_file=source_file,
+                started_at=datetime.now(timezone.utc),
+                status="running",
+                total_records=total_records,
+                processed_count=0,
+                config_hash=config_hash,
+            )
+            session.add(run)
+            await session.commit()
+            await session.refresh(run)
+            return run.id
+
+    async def update_progress(self, run_id: int, processed_count: int) -> None:
+        """Update the processed_count for a run."""
+        from sqlalchemy import update
+
+        async with self._db.session() as session:
+            await session.execute(
+                update(SiphonRun)
+                .where(SiphonRun.id == run_id)
+                .values(processed_count=processed_count)
+            )
+            await session.commit()
+
+    async def complete_run(self, run_id: int) -> None:
+        """Mark a run as completed."""
+        from sqlalchemy import update
+
+        async with self._db.session() as session:
+            await session.execute(
+                update(SiphonRun)
+                .where(SiphonRun.id == run_id)
+                .values(
+                    status="completed",
+                    completed_at=datetime.now(timezone.utc),
+                )
+            )
+            await session.commit()
+
+    async def fail_run(self, run_id: int, error_message: str) -> None:
+        """Mark a run as failed with an error message."""
+        from sqlalchemy import update
+
+        async with self._db.session() as session:
+            await session.execute(
+                update(SiphonRun)
+                .where(SiphonRun.id == run_id)
+                .values(
+                    status="failed",
+                    error_message=error_message,
+                    completed_at=datetime.now(timezone.utc),
+                )
+            )
+            await session.commit()
+
+    async def get_run(self, run_id: int) -> SiphonRun | None:
+        """Fetch a run by id."""
+        from sqlalchemy import select
+
+        async with self._db.session() as session:
+            result = await session.execute(
+                select(SiphonRun).where(SiphonRun.id == run_id)
+            )
+            return result.scalar_one_or_none()

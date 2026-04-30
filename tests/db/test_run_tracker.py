@@ -49,3 +49,62 @@ class TestRunTrackerSetup:
             "completed_at", "status", "total_records", "processed_count",
             "error_message", "config_hash",
         }
+
+
+class TestRunLifecycle:
+    async def test_start_run_returns_id_and_records_running_status(self, engine_setup):
+        tracker = RunTracker(engine_setup)
+        await tracker.create_runs_table()
+
+        run_id = await tracker.start_run(
+            pipeline_name="test",
+            source_file="/tmp/data.csv",
+            total_records=10,
+            config_hash="abc123",
+        )
+        assert isinstance(run_id, int)
+
+        run = await tracker.get_run(run_id)
+        assert run.status == "running"
+        assert run.pipeline_name == "test"
+        assert run.source_file == "/tmp/data.csv"
+        assert run.total_records == 10
+        assert run.processed_count == 0
+        assert run.config_hash == "abc123"
+        assert run.started_at is not None
+        assert run.completed_at is None
+
+    async def test_update_progress_sets_processed_count(self, engine_setup):
+        tracker = RunTracker(engine_setup)
+        await tracker.create_runs_table()
+        run_id = await tracker.start_run("p", "/f.csv", 10, "h")
+
+        await tracker.update_progress(run_id, 4)
+        run = await tracker.get_run(run_id)
+        assert run.processed_count == 4
+
+        await tracker.update_progress(run_id, 7)
+        run = await tracker.get_run(run_id)
+        assert run.processed_count == 7
+
+    async def test_complete_run_marks_completed(self, engine_setup):
+        tracker = RunTracker(engine_setup)
+        await tracker.create_runs_table()
+        run_id = await tracker.start_run("p", "/f.csv", 10, "h")
+
+        await tracker.complete_run(run_id)
+        run = await tracker.get_run(run_id)
+        assert run.status == "completed"
+        assert run.completed_at is not None
+        assert run.error_message is None
+
+    async def test_fail_run_marks_failed_with_error(self, engine_setup):
+        tracker = RunTracker(engine_setup)
+        await tracker.create_runs_table()
+        run_id = await tracker.start_run("p", "/f.csv", 10, "h")
+
+        await tracker.fail_run(run_id, "boom")
+        run = await tracker.get_run(run_id)
+        assert run.status == "failed"
+        assert run.error_message == "boom"
+        assert run.completed_at is not None
