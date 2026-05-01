@@ -327,6 +327,7 @@ class TestRunCommand:
             create_tables=True,
             sheet=None,
             resume=False,
+            user=None,
         )
 
 
@@ -574,3 +575,50 @@ class TestResumeAndBatchSizeFlags:
 
         kwargs = mock_instance.run.call_args.kwargs
         assert kwargs.get("resume", False) is False
+
+
+class TestUserFlag:
+    def test_user_flag_passed_to_pipeline(self, tmp_path):
+        from unittest.mock import AsyncMock, MagicMock, patch
+        from siphon.core.pipeline import PipelineResult
+
+        config_file = _write_valid_config(tmp_path)
+
+        with patch("siphon.cli.Pipeline") as MockPipeline, \
+             patch("siphon.cli.load_config") as mock_load:
+            mock_load.return_value = MagicMock()
+            mock_load.return_value.pipeline.log_level = "info"
+            mock_instance = MagicMock()
+            mock_instance.run = AsyncMock(return_value=PipelineResult())
+            MockPipeline.return_value = mock_instance
+
+            runner.invoke(app, [
+                "run", "input.csv",
+                "--config", str(config_file),
+                "--no-review",
+                "--user", "alice",
+            ])
+
+        kwargs = mock_instance.run.call_args.kwargs
+        assert kwargs["user"] == "alice"
+
+    def test_user_default_is_none(self, tmp_path):
+        from unittest.mock import AsyncMock, MagicMock, patch
+        from siphon.core.pipeline import PipelineResult
+
+        config_file = _write_valid_config(tmp_path)
+
+        with patch("siphon.cli.Pipeline") as MockPipeline, \
+             patch("siphon.cli.load_config") as mock_load:
+            mock_load.return_value = MagicMock()
+            mock_load.return_value.pipeline.log_level = "info"
+            mock_instance = MagicMock()
+            mock_instance.run = AsyncMock(return_value=PipelineResult())
+            MockPipeline.return_value = mock_instance
+
+            runner.invoke(app, [
+                "run", "input.csv", "--config", str(config_file), "--no-review",
+            ])
+
+        kwargs = mock_instance.run.call_args.kwargs
+        assert kwargs.get("user") is None

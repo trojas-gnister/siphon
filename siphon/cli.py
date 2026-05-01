@@ -57,6 +57,7 @@ def run(
     quiet: bool = typer.Option(False, "--quiet", "-q", help="Set log level to error only"),
     resume: bool = typer.Option(False, "--resume", help="Continue from the last failed run"),
     batch_size: Optional[int] = typer.Option(None, "--batch-size", help="Records per commit (overrides config)"),
+    user: Optional[str] = typer.Option(None, "--user", help="Username for audit trail"),
 ) -> None:
     """Execute the full ETL pipeline."""
     try:
@@ -80,6 +81,7 @@ def run(
                 create_tables=create_tables,
                 sheet=sheet,
                 resume=resume,
+                user=user,
             )
         )
 
