@@ -67,9 +67,18 @@ class AuditLogger:
     calls flush() after the batch successfully commits.
     """
 
-    def __init__(self, db_engine: DatabaseEngine, run_id: int) -> None:
+    def __init__(
+        self,
+        db_engine: DatabaseEngine,
+        run_id: int,
+        *,
+        source_file: str | None = None,
+        reviewed_by: str | None = None,
+    ) -> None:
         self._db = db_engine
         self._run_id = run_id
+        self._default_source_file = source_file
+        self._default_reviewed_by = reviewed_by
         self._buffer: list[AuditEntry] = []
 
     async def create_audit_table(self) -> None:
@@ -84,7 +93,11 @@ class AuditLogger:
         return self._buffer
 
     def record(self, entry: AuditEntry) -> None:
-        """Buffer an audit entry for later flush."""
+        """Buffer an audit entry, applying defaults for missing optional fields."""
+        if entry.source_file is None:
+            entry.source_file = self._default_source_file
+        if entry.reviewed_by is None:
+            entry.reviewed_by = self._default_reviewed_by
         self._buffer.append(entry)
 
     def clear(self) -> None:

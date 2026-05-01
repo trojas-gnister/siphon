@@ -159,3 +159,43 @@ class TestAuditLoggerBuffer:
         assert row.source_file == "/data/import.csv"
         assert row.source_row == 5
         assert row.reviewed_by == "alice"
+
+
+class TestAuditLoggerDefaults:
+    async def test_defaults_applied_to_entries(self, engine_setup):
+        from sqlalchemy import select
+
+        logger = AuditLogger(
+            engine_setup, run_id=1,
+            source_file="/tmp/data.csv",
+            reviewed_by="alice",
+        )
+        await logger.create_audit_table()
+        logger.record(AuditEntry(target_table="t", target_pk="1", action="insert"))
+        await logger.flush()
+
+        async with engine_setup.session() as session:
+            row = (await session.execute(select(SiphonAudit))).scalar_one()
+        assert row.source_file == "/tmp/data.csv"
+        assert row.reviewed_by == "alice"
+
+    async def test_explicit_entry_values_override_defaults(self, engine_setup):
+        from sqlalchemy import select
+
+        logger = AuditLogger(
+            engine_setup, run_id=1,
+            source_file="/tmp/default.csv",
+            reviewed_by="default_user",
+        )
+        await logger.create_audit_table()
+        logger.record(AuditEntry(
+            target_table="t", target_pk="1", action="insert",
+            source_file="/tmp/override.csv",
+            reviewed_by="override_user",
+        ))
+        await logger.flush()
+
+        async with engine_setup.session() as session:
+            row = (await session.execute(select(SiphonAudit))).scalar_one()
+        assert row.source_file == "/tmp/override.csv"
+        assert row.reviewed_by == "override_user"
