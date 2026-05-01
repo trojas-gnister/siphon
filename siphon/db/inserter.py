@@ -185,21 +185,7 @@ class Inserter:
                 records = self._sort_records_for_self_ref(records, rel)
                 break
 
-        # Group fields by table for quick lookup.
-        # Start with top-level fields, then layer in collection fields
-        # for the target tables being inserted.
-        table_fields: dict[str, list] = defaultdict(list)
-        for field in self._config.schema_.fields:
-            table_fields[field.db.table].append(field)
-
-        # Include collection fields for tables in this insert batch.
-        # Collection fields provide the column mappings for child tables.
-        if self._config.schema_.collections:
-            for collection in self._config.schema_.collections:
-                for field in collection.fields:
-                    existing = table_fields[field.db.table]
-                    if not any(f.db.column == field.db.column for f in existing):
-                        table_fields[field.db.table].append(field)
+        table_fields = self._build_table_fields_map()
 
         # Find junction relationships
         junctions = [
@@ -223,34 +209,14 @@ class Inserter:
         inserted_count = 0
         for batch_start in range(0, len(records), effective_batch):
             batch = records[batch_start : batch_start + effective_batch]
-            try:
-                async with self._db.session() as session:
-                    async with session.begin():
-                        for record in batch:
-                            await self._insert_one_record(
-                                session,
-                                record,
-                                table_order,
-                                table_fields,
-                                junctions,
-                                belongs_tos,
-                                audit_logger=audit_logger,
-                            )
-                        # Transaction commits at end of `async with session.begin()`
-            except DatabaseError:
-                if audit_logger is not None:
-                    audit_logger.clear()
-                raise
-            except Exception as e:
-                if audit_logger is not None:
-                    audit_logger.clear()
-                raise DatabaseError(
-                    f"Insertion failed, transaction rolled back: {e}"
-                ) from e
-
-            # Flush audit entries for this successfully committed batch
-            if audit_logger is not None:
-                await audit_logger.flush()
+            await self._insert_batch(
+                batch,
+                table_order=table_order,
+                table_fields=table_fields,
+                junctions=junctions,
+                belongs_tos=belongs_tos,
+                audit_logger=audit_logger,
+            )
 
             inserted_count += len(batch)
             if on_batch is not None:
@@ -260,6 +226,71 @@ class Inserter:
 
         logger.info(f"Inserted {inserted_count} records")
         return inserted_count
+
+    def _build_table_fields_map(self) -> dict[str, list]:
+        """Map each target table name to its list of FieldConfigs.
+
+        Starts with top-level fields, then layers in collection fields
+        (deduped by column name). Collection fields provide the column
+        mappings for child tables.
+        """
+        table_fields: dict[str, list] = defaultdict(list)
+        for field in self._config.schema_.fields:
+            table_fields[field.db.table].append(field)
+
+        if self._config.schema_.collections:
+            for collection in self._config.schema_.collections:
+                for field in collection.fields:
+                    existing = table_fields[field.db.table]
+                    if not any(f.db.column == field.db.column for f in existing):
+                        table_fields[field.db.table].append(field)
+
+        return table_fields
+
+    async def _insert_batch(
+        self,
+        batch: list[dict],
+        *,
+        table_order: list[str],
+        table_fields: dict,
+        junctions: list,
+        belongs_tos: list,
+        audit_logger: "AuditLogger | None" = None,
+    ) -> None:
+        """Insert a single batch of records inside one transaction.
+
+        Audit entries collected during the batch are flushed if the transaction
+        commits successfully; cleared if it fails. DatabaseError is re-raised
+        as-is; other exceptions are wrapped in DatabaseError.
+        """
+        try:
+            async with self._db.session() as session:
+                async with session.begin():
+                    for record in batch:
+                        await self._insert_one_record(
+                            session,
+                            record,
+                            table_order,
+                            table_fields,
+                            junctions,
+                            belongs_tos,
+                            audit_logger=audit_logger,
+                        )
+                    # Transaction commits at end of `async with session.begin()`
+        except DatabaseError:
+            if audit_logger is not None:
+                audit_logger.clear()
+            raise
+        except Exception as e:
+            if audit_logger is not None:
+                audit_logger.clear()
+            raise DatabaseError(
+                f"Insertion failed, transaction rolled back: {e}"
+            ) from e
+
+        # Flush audit entries for this successfully committed batch
+        if audit_logger is not None:
+            await audit_logger.flush()
 
     def _build_row_data_for_table(
         self,
