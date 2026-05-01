@@ -55,6 +55,8 @@ def run(
     output: str = typer.Option("table", "--output", help="Output format: table | json"),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Set log level to debug"),
     quiet: bool = typer.Option(False, "--quiet", "-q", help="Set log level to error only"),
+    resume: bool = typer.Option(False, "--resume", help="Continue from the last failed run"),
+    batch_size: Optional[int] = typer.Option(None, "--batch-size", help="Records per commit (overrides config)"),
 ) -> None:
     """Execute the full ETL pipeline."""
     try:
@@ -66,6 +68,9 @@ def run(
         elif quiet:
             cfg.pipeline.log_level = "error"
 
+        if batch_size is not None:
+            cfg.pipeline.batch_size = batch_size
+
         pipeline = Pipeline(cfg)
         result = asyncio.run(
             pipeline.run(
@@ -74,6 +79,7 @@ def run(
                 no_review=no_review,
                 create_tables=create_tables,
                 sheet=sheet,
+                resume=resume,
             )
         )
 

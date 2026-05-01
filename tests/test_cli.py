@@ -326,6 +326,7 @@ class TestRunCommand:
             no_review=True,
             create_tables=True,
             sheet=None,
+            resume=False,
         )
 
 
@@ -500,3 +501,76 @@ class TestSummaryWithSkippedChunks:
 
         assert result.exit_code == 0
         assert "Skipped" in result.output or "skipped" in result.output.lower()
+
+
+class TestResumeAndBatchSizeFlags:
+    def test_resume_flag_passed_to_pipeline(self, tmp_path):
+        from unittest.mock import AsyncMock, MagicMock, patch
+        from siphon.core.pipeline import PipelineResult
+
+        config_file = _write_valid_config(tmp_path)
+
+        with patch("siphon.cli.Pipeline") as MockPipeline, \
+             patch("siphon.cli.load_config") as mock_load:
+            mock_load.return_value = MagicMock()
+            mock_load.return_value.pipeline.log_level = "info"
+            mock_instance = MagicMock()
+            mock_instance.run = AsyncMock(return_value=PipelineResult())
+            MockPipeline.return_value = mock_instance
+
+            runner.invoke(app, [
+                "run", "input.csv",
+                "--config", str(config_file),
+                "--no-review",
+                "--resume",
+            ])
+
+        kwargs = mock_instance.run.call_args.kwargs
+        assert kwargs["resume"] is True
+
+    def test_batch_size_flag_overrides_config(self, tmp_path):
+        from unittest.mock import AsyncMock, MagicMock, patch
+        from siphon.core.pipeline import PipelineResult
+
+        config_file = _write_valid_config(tmp_path)
+
+        with patch("siphon.cli.Pipeline") as MockPipeline, \
+             patch("siphon.cli.load_config") as mock_load:
+            mock_cfg = MagicMock()
+            mock_cfg.pipeline.log_level = "info"
+            mock_cfg.pipeline.batch_size = 500  # original config value
+            mock_load.return_value = mock_cfg
+            mock_instance = MagicMock()
+            mock_instance.run = AsyncMock(return_value=PipelineResult())
+            MockPipeline.return_value = mock_instance
+
+            runner.invoke(app, [
+                "run", "input.csv",
+                "--config", str(config_file),
+                "--no-review",
+                "--batch-size", "10",
+            ])
+
+        # The CLI overwrites the config's batch_size before constructing Pipeline
+        assert mock_cfg.pipeline.batch_size == 10
+
+    def test_resume_default_is_false(self, tmp_path):
+        from unittest.mock import AsyncMock, MagicMock, patch
+        from siphon.core.pipeline import PipelineResult
+
+        config_file = _write_valid_config(tmp_path)
+
+        with patch("siphon.cli.Pipeline") as MockPipeline, \
+             patch("siphon.cli.load_config") as mock_load:
+            mock_load.return_value = MagicMock()
+            mock_load.return_value.pipeline.log_level = "info"
+            mock_instance = MagicMock()
+            mock_instance.run = AsyncMock(return_value=PipelineResult())
+            MockPipeline.return_value = mock_instance
+
+            runner.invoke(app, [
+                "run", "input.csv", "--config", str(config_file), "--no-review",
+            ])
+
+        kwargs = mock_instance.run.call_args.kwargs
+        assert kwargs.get("resume", False) is False
