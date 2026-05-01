@@ -54,6 +54,62 @@ class Pipeline:
     def __init__(self, config: SiphonConfig) -> None:
         self._config = config
 
+    def _effective_fields(self):
+        """Return the flat list of FieldConfig used by validate/dedup/insert.
+
+        - Single-source: config.schema_.fields
+        - Multi-source: concatenation of each source's fields (in source order),
+          filtered to only those with a `db` mapping. Fields without `db` are
+          treated as join-key intermediates: they exist so the per-source
+          mapper produces the join key in the mapped record, but they are not
+          themselves persisted.
+        """
+        if self._config.sources:
+            flat = []
+            for src in self._config.sources:
+                if src.fields:
+                    for f in src.fields:
+                        if f.db is not None:
+                            flat.append(f)
+            return flat
+        return self._config.schema_.fields or []
+
+    async def _load_source(self, src):
+        """Load raw records from a single SourceConfig (with its own path).
+
+        Used for multi-source mode where each source has a path declared
+        in the YAML.
+        """
+        if not src.path:
+            raise ConfigError(
+                f"Source '{src.name}' has no path declared"
+            )
+
+        if src.type == "spreadsheet":
+            loader = SpreadsheetLoader()
+            return loader.load(src.path)
+        elif src.type == "xml":
+            loader = XMLLoader(
+                root=src.root,
+                encoding=src.encoding,
+                force_list=src.force_list,
+            )
+            return loader.load(src.path)
+        else:
+            raise ConfigError(f"Unsupported source type: {src.type}")
+
+    def _build_source_mapper(self, src, custom_transforms: dict):
+        """Build a Mapper that operates only on this source's fields.
+
+        Creates a transient SiphonConfig view with `schema_.fields = src.fields`
+        so the existing Mapper class works unchanged. Collections are dropped
+        in this view — collections are only supported on single-source XML/JSON.
+        """
+        cfg_view = self._config.model_copy(deep=True)
+        cfg_view.schema_.fields = list(src.fields or [])
+        cfg_view.schema_.collections = None
+        return Mapper(cfg_view, custom_transforms)
+
     def _config_hash(self) -> str:
         """Stable SHA-256 hash of the config (excluding fields that don't affect data)."""
         payload = self._config.model_dump(by_alias=True, mode="json")
@@ -113,62 +169,130 @@ class Pipeline:
                 self._config.transforms.file
             )
 
-        # 3. Load source data
-        source_config = self._config.source
-        if source_config.type == "spreadsheet":
-            loader = SpreadsheetLoader()
-            input_path = Path(input_path)
+        # 3. Load source data — dispatch on single-source vs multi-source
+        if self._config.sources:
+            # ===== MULTI-SOURCE MODE =====
+            from siphon.core.joiner import join_records
 
-            if input_path.is_dir():
-                files = self._scan_directory(input_path)
-                if not files:
-                    logger.warning(
-                        "No supported files found in %s", input_path
-                    )
-                    return result
+            # Normalize: collapse all sources' fields into schema_.fields so
+            # downstream validator/model_gen/inserter work unchanged.
+            self._config.schema_.fields = self._effective_fields()
 
-                source_records: list[dict] = []
-                for f in files:
-                    logger.info("Processing %s", f)
-                    source_records.extend(loader.load(f, sheet=sheet))
+            # Load + map each source independently
+            mapped_per_source: dict[str, list[dict]] = {}
+            for src in self._config.sources:
+                logger.info("Loading source '%s' from %s", src.name, src.path)
+                raw = await self._load_source(src)
+                src_mapper = self._build_source_mapper(src, custom_transforms)
+                mapped_per_source[src.name] = src_mapper.map_records(raw)
+                logger.info(
+                    "Source '%s': loaded %d records, mapped to %d",
+                    src.name, len(raw), len(mapped_per_source[src.name]),
+                )
+
+            # Apply joins in order
+            if self._config.joins:
+                first_left = self._config.joins[0].left
+                merged = list(mapped_per_source[first_left])
+                for j in self._config.joins:
+                    if j.left == first_left:
+                        # Extending the running merged set
+                        right_records = mapped_per_source[j.right]
+                        merged = join_records(
+                            merged, right_records,
+                            on=j.on, join_type=j.type,
+                        )
+                    else:
+                        # Independent side join: union with the running set
+                        side = join_records(
+                            mapped_per_source[j.left],
+                            mapped_per_source[j.right],
+                            on=j.on, join_type=j.type,
+                        )
+                        merged.extend(side)
+                records = merged
             else:
-                logger.info("Loading data from %s", input_path)
-                source_records = loader.load(input_path, sheet=sheet)
+                # No joins declared: just union all sources' records
+                records = []
+                for src_records in mapped_per_source.values():
+                    records.extend(src_records)
 
-        elif source_config.type == "xml":
-            loader = XMLLoader(
-                root=source_config.root,
-                encoding=source_config.encoding,
-                force_list=source_config.force_list,
+            result.total_extracted = len(records)
+
+            # Multi-source mode does not support collections (collections are
+            # for nested XML/JSON within a single source).
+            all_collection_records: dict[str, list[dict]] = defaultdict(list)
+
+            # input_path no longer determines source paths — but pipeline result
+            # tracking still needs a value. Use a synthetic name describing the
+            # multi-source setup.
+            effective_input_path = (
+                f"<multi-source: {', '.join(s.name for s in self._config.sources)}>"
             )
-            logger.info("Loading data from %s", input_path)
-            source_records = loader.load(input_path)
+
+            if not records:
+                logger.warning("No records after mapping — nothing to process")
+                return result
 
         else:
-            raise ConfigError(
-                f"Unsupported source type: {source_config.type}"
-            )
+            # ===== SINGLE-SOURCE MODE — existing behaviour =====
+            source_config = self._config.source
+            if source_config.type == "spreadsheet":
+                loader = SpreadsheetLoader()
+                input_path = Path(input_path)
 
-        if not source_records:
-            logger.warning("No records loaded — nothing to process")
-            return result
+                if input_path.is_dir():
+                    files = self._scan_directory(input_path)
+                    if not files:
+                        logger.warning(
+                            "No supported files found in %s", input_path
+                        )
+                        return result
 
-        # 4. Map source records to target schema
-        mapper = Mapper(self._config, custom_transforms)
-        records = mapper.map_records(source_records)
-        result.total_extracted = len(records)
+                    source_records: list[dict] = []
+                    for f in files:
+                        logger.info("Processing %s", f)
+                        source_records.extend(loader.load(f, sheet=sheet))
+                else:
+                    logger.info("Loading data from %s", input_path)
+                    source_records = loader.load(input_path, sheet=sheet)
 
-        # 5. Map collections (if any)
-        all_collection_records: dict[str, list[dict]] = defaultdict(list)
-        if self._config.schema_.collections:
-            for source_rec, mapped_rec in zip(source_records, records):
-                collections = mapper.map_collections(source_rec, mapped_rec)
-                for name, items in collections.items():
-                    all_collection_records[name].extend(items)
+            elif source_config.type == "xml":
+                loader = XMLLoader(
+                    root=source_config.root,
+                    encoding=source_config.encoding,
+                    force_list=source_config.force_list,
+                )
+                logger.info("Loading data from %s", input_path)
+                source_records = loader.load(input_path)
 
-        if not records:
-            logger.warning("No records after mapping — nothing to process")
-            return result
+            else:
+                raise ConfigError(
+                    f"Unsupported source type: {source_config.type}"
+                )
+
+            if not source_records:
+                logger.warning("No records loaded — nothing to process")
+                return result
+
+            # 4. Map source records to target schema
+            mapper = Mapper(self._config, custom_transforms)
+            records = mapper.map_records(source_records)
+            result.total_extracted = len(records)
+
+            # 5. Map collections (if any)
+            all_collection_records: dict[str, list[dict]] = defaultdict(list)
+            if self._config.schema_.collections:
+                for source_rec, mapped_rec in zip(source_records, records):
+                    collections = mapper.map_collections(source_rec, mapped_rec)
+                    for name, items in collections.items():
+                        all_collection_records[name].extend(items)
+
+            if not records:
+                logger.warning("No records after mapping — nothing to process")
+                return result
+
+            effective_input_path = str(input_path)
 
         # 6. Validate main records
         logger.info("Validating %d records", len(records))
@@ -323,7 +447,7 @@ class Pipeline:
                 if resume:
                     resumable = await run_tracker.find_resumable_run(
                         pipeline_name=self._config.name,
-                        source_file=str(input_path),
+                        source_file=effective_input_path,
                         config_hash=self._config_hash(),
                     )
                     if resumable is not None:
@@ -338,7 +462,7 @@ class Pipeline:
 
                 run_id = await run_tracker.start_run(
                     pipeline_name=self._config.name,
-                    source_file=str(input_path),
+                    source_file=effective_input_path,
                     total_records=len(valid_records),
                     config_hash=self._config_hash(),
                 )
@@ -352,7 +476,7 @@ class Pipeline:
                 audit_logger = AuditLogger(
                     db_engine,
                     run_id=run_id,
-                    source_file=str(input_path),
+                    source_file=effective_input_path,
                     reviewed_by=user,
                 )
                 await audit_logger.create_audit_table()
