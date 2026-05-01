@@ -50,40 +50,30 @@ class Inserter:
         self._lookup_cache: dict[str, dict[str, any]] = defaultdict(dict)
 
     def topological_sort(self) -> list[str]:
-        """Sort table names so parents come before children (Kahn's algorithm).
+        """Sort table names so parents come before children.
 
-        Only considers data tables (not junction tables).
-        Tables with no dependencies come first.
-        Raises DatabaseError if a circular dependency is detected.
+        Only considers data tables (not junction tables). Self-referential
+        relationships are excluded from the graph (handled separately by
+        record-level sorting).
+
+        Raises:
+            DatabaseError: If a circular dependency is detected.
         """
+        from siphon.utils.graph import topological_sort as _topo_sort
+
         data_tables = list(self._config.schema_.tables.keys())
-        in_degree = {t: 0 for t in data_tables}
-        graph = defaultdict(list)  # parent -> [children]
+        edges: list[tuple[str, str]] = []
 
         for rel in self._config.relationships:
             if isinstance(rel, BelongsToRelationship):
-                child = rel.table
-                parent = rel.references
-                if child != parent:  # skip self-referential for graph purposes
-                    graph[parent].append(child)
-                    in_degree[child] += 1
+                # Skip self-referential — handled at record level
+                if rel.table != rel.references:
+                    edges.append((rel.references, rel.table))
 
-        # Kahn's algorithm
-        queue = [t for t in data_tables if in_degree[t] == 0]
-        result = []
-
-        while queue:
-            node = queue.pop(0)
-            result.append(node)
-            for neighbor in graph[node]:
-                in_degree[neighbor] -= 1
-                if in_degree[neighbor] == 0:
-                    queue.append(neighbor)
-
-        if len(result) != len(data_tables):
-            raise DatabaseError("Circular dependency detected in table relationships")
-
-        return result
+        try:
+            return _topo_sort(data_tables, edges)
+        except ValueError as e:
+            raise DatabaseError(f"Circular dependency detected in table relationships: {e}") from e
 
     async def load_existing_keys(self):
         """Pre-populate lookup cache from existing DB rows for FK resolution."""
