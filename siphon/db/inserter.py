@@ -8,6 +8,7 @@ from collections import defaultdict
 from sqlalchemy import select
 
 from siphon.config.schema import BelongsToRelationship, JunctionRelationship, SiphonConfig
+from siphon.db.audit import AuditEntry, AuditLogger
 from siphon.db.engine import DatabaseEngine
 from siphon.db.models import ModelGenerator
 from siphon.db.upsert import (
@@ -153,6 +154,7 @@ class Inserter:
         target_tables: set[str] | None = None,
         batch_size: int | None = None,
         on_batch=None,
+        audit_logger: "AuditLogger | None" = None,
     ) -> int:
         """Insert records, optionally in batches with a per-batch progress callback.
 
@@ -229,14 +231,23 @@ class Inserter:
                                 table_fields,
                                 junctions,
                                 belongs_tos,
+                                audit_logger=audit_logger,
                             )
                         # Transaction commits at end of `async with session.begin()`
             except DatabaseError:
+                if audit_logger is not None:
+                    audit_logger.clear()
                 raise
             except Exception as e:
+                if audit_logger is not None:
+                    audit_logger.clear()
                 raise DatabaseError(
                     f"Insertion failed, transaction rolled back: {e}"
                 ) from e
+
+            # Flush audit entries for this successfully committed batch
+            if audit_logger is not None:
+                await audit_logger.flush()
 
             inserted_count += len(batch)
             if on_batch is not None:
@@ -255,6 +266,7 @@ class Inserter:
         table_fields: dict,
         junctions: list,
         belongs_tos: list,
+        audit_logger: "AuditLogger | None" = None,
     ) -> None:
         """Insert a single record across all relevant tables and junctions.
 
@@ -301,11 +313,25 @@ class Inserter:
                 session.add(instance)
                 await session.flush()
                 pk_value = getattr(instance, pk_config.column)
+                if audit_logger is not None:
+                    audit_logger.record(AuditEntry(
+                        target_table=table_name,
+                        target_pk=str(pk_value),
+                        action="insert",
+                    ))
             else:
                 # Upsert path
-                pk_value = await self._execute_upsert(
+                pk_value, action, field_changes = await self._execute_upsert(
                     session, model, table_name, row_data, pk_config, table_cfg.on_conflict
                 )
+                # action is None for no-op upserts (existing row, no real change)
+                if audit_logger is not None and action is not None:
+                    audit_logger.record(AuditEntry(
+                        target_table=table_name,
+                        target_pk=str(pk_value),
+                        action=action,
+                        field_changes=field_changes,
+                    ))
 
             record_ids[table_name] = pk_value
 
@@ -339,13 +365,24 @@ class Inserter:
         pk_config,
         on_conflict_cfg,
     ):
-        """Execute an upsert statement and return the affected row's PK value."""
+        """Execute an upsert and return (pk_value, action, field_changes).
+
+        action is one of "insert" | "update" | "skip" | None.
+        None indicates a no-op (existing row, no values changed) — caller
+        should suppress the audit entry. field_changes is None for
+        insert/skip/no-op, or a {col: {old, new}} dict for update.
+        """
         db_conflict_key = self._field_names_to_columns(on_conflict_cfg.key)
 
         if on_conflict_cfg.update_columns == "all":
             db_update_columns = "all"
         else:
             db_update_columns = self._field_names_to_columns(on_conflict_cfg.update_columns)
+
+        # Look up existing row BEFORE upsert so we can compute field changes
+        existing_row = await self._lookup_existing_row(
+            session, model, db_conflict_key, row_data
+        )
 
         stmt = build_upsert_statement(
             dialect=self._dialect,
@@ -357,12 +394,74 @@ class Inserter:
         )
 
         if isinstance(stmt, GenericUpsertPlan):
-            return await self._execute_generic_upsert_plan(session, model, pk_config, stmt)
+            pk_value = await self._execute_generic_upsert_plan(
+                session, model, pk_config, stmt
+            )
+        else:
+            await session.execute(stmt)
+            pk_value = await self._lookup_pk_by_conflict_key(
+                session, model, pk_config, db_conflict_key, row_data
+            )
 
-        await session.execute(stmt)
-        return await self._lookup_pk_by_conflict_key(
-            session, model, pk_config, db_conflict_key, row_data
+        # Decide action + field_changes
+        if existing_row is None:
+            return pk_value, "insert", None
+
+        if on_conflict_cfg.action == "skip":
+            return pk_value, "skip", None
+
+        # action == "update": compute the diff
+        field_changes = self._compute_upsert_changes(
+            row_data, existing_row, db_conflict_key, db_update_columns, model
         )
+
+        if not field_changes:
+            # Same values — no meaningful update happened; suppress audit entry
+            return pk_value, None, None
+
+        return pk_value, "update", field_changes
+
+    async def _lookup_existing_row(
+        self, session, model, db_conflict_key: list[str], row_data: dict
+    ) -> dict | None:
+        """Return a dict of {column: value} for the existing row, or None."""
+        from sqlalchemy import select
+
+        stmt = select(model)
+        for col_name in db_conflict_key:
+            stmt = stmt.where(getattr(model, col_name) == row_data[col_name])
+        result = await session.execute(stmt)
+        row = result.scalar_one_or_none()
+        if row is None:
+            return None
+        return {col.name: getattr(row, col.name) for col in model.__table__.columns}
+
+    def _compute_upsert_changes(
+        self,
+        row_data: dict,
+        existing_row: dict,
+        key_columns: list[str],
+        update_columns,
+        model,
+    ) -> dict[str, dict]:
+        """Compute {column: {old, new}} for columns that differ in an upsert."""
+        key_set = set(key_columns)
+
+        if update_columns == "all":
+            candidates = [
+                col.name for col in model.__table__.columns
+                if col.name not in key_set and col.name in row_data
+            ]
+        else:
+            candidates = [c for c in update_columns if c in row_data]
+
+        changes = {}
+        for col_name in candidates:
+            new_val = row_data.get(col_name)
+            old_val = existing_row.get(col_name)
+            if new_val != old_val:
+                changes[col_name] = {"old": old_val, "new": new_val}
+        return changes
 
     def _field_names_to_columns(self, field_names: list[str]) -> list[str]:
         """Map schema field names to their DB column names."""
