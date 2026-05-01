@@ -149,6 +149,38 @@ siphon run data.csv --dry-run --output json
 The diff respects the `on_conflict.key` declared on each table. If no `on_conflict` is configured, every record is categorized as `Insert`.
 
 
+## Resumable Runs
+
+When importing large datasets, a failure mid-import doesn't mean starting over. Siphon tracks each run in a `_siphon_runs` metadata table inside the target database, and `--resume` continues from where the last failure stopped.
+
+```bash
+# Initial run fails partway through (e.g., network blip, constraint violation)
+siphon run big_data.csv
+
+# Fix whatever caused the failure, then resume
+siphon run big_data.csv --resume
+```
+
+**How it works:**
+- Records are inserted in batches (default 500). Each batch commits in its own transaction.
+- After each successful batch, Siphon updates `processed_count` in `_siphon_runs`.
+- On failure, the failing batch is rolled back; earlier batches stay committed.
+- `--resume` finds the most recent failed run for the same pipeline name + source file + config hash, and skips records up to its `processed_count`.
+
+**Configuration:**
+```yaml
+pipeline:
+  batch_size: 500       # records per transaction commit (default 500)
+  track_runs: true      # enable _siphon_runs table (default true)
+```
+
+**Trade-offs:**
+- Batch commits are not atomic across the whole import. If you need all-or-nothing semantics, set `batch_size` larger than your dataset.
+- Resume requires upserts or schemas with no unique constraints — otherwise re-processing already-inserted records will fail. Combine with `on_conflict.action: update` for safe resumability.
+- Run tracking adds a `_siphon_runs` table to the target database. Disable with `track_runs: false` if you don't want it.
+- Resume tracks main records only — collection records (from XML/JSON nested arrays) are re-processed on resume.
+
+
 ## Transforms
 
 Built-in transforms can be applied inline on any field:
