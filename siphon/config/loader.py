@@ -98,7 +98,9 @@ def _cross_validate(config: SiphonConfig) -> None:
     Validates both top-level schema fields and fields inside collections.
     Raises ConfigError for any violation.
     """
-    for field in config.schema_.fields:
+    schema_fields = config.schema_.fields or []
+
+    for field in schema_fields:
         _validate_field(field, config)
 
     if config.schema_.collections:
@@ -107,7 +109,7 @@ def _cross_validate(config: SiphonConfig) -> None:
                 _validate_field(field, config, context=f"In collection '{collection.name}', ")
 
     # Validate on_conflict.key references known field names
-    known_field_names = {f.name for f in config.schema_.fields}
+    known_field_names = {f.name for f in schema_fields}
     if config.schema_.collections:
         for collection in config.schema_.collections:
             for field in collection.fields:
@@ -121,6 +123,21 @@ def _cross_validate(config: SiphonConfig) -> None:
                 raise ConfigError(
                     f"Table '{table_name}' on_conflict.key references unknown "
                     f"field '{key_field}'. Known fields: {sorted(known_field_names)}"
+                )
+
+    # Validate join.left and join.right reference real sources
+    if config.sources and config.joins:
+        source_names = {s.name for s in config.sources}
+        for i, j in enumerate(config.joins):
+            if j.left not in source_names:
+                raise ConfigError(
+                    f"join[{i}].left='{j.left}' is not a declared source. "
+                    f"Known sources: {sorted(source_names)}"
+                )
+            if j.right not in source_names:
+                raise ConfigError(
+                    f"join[{i}].right='{j.right}' is not a declared source. "
+                    f"Known sources: {sorted(source_names)}"
                 )
 
 

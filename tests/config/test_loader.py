@@ -819,3 +819,71 @@ pipeline: { review: false }
     p.write_text(config_yaml)
     cfg = load_config(p)
     assert cfg.schema_.tables["companies"].on_conflict.action == "update"
+
+
+def test_join_unknown_source_raises(tmp_path):
+    yaml = """
+name: bad
+sources:
+  - name: a
+    type: spreadsheet
+    path: "./a.csv"
+    fields:
+      - name: x
+        source: "X"
+        type: string
+        db: { table: t, column: x }
+joins:
+  - left: a
+    right: nonexistent
+    "on": x
+database: { url: "sqlite:///t.db" }
+schema:
+  tables:
+    t: { primary_key: { column: id, type: auto_increment } }
+pipeline: { review: false }
+"""
+    p = tmp_path / "siphon.yaml"
+    p.write_text(yaml)
+    from siphon.utils.errors import ConfigError
+    from siphon.config.loader import load_config
+    with pytest.raises(ConfigError, match="join.*nonexistent"):
+        load_config(p)
+
+
+def test_join_with_valid_sources_loads(tmp_path):
+    yaml = """
+name: ok
+sources:
+  - name: a
+    type: spreadsheet
+    path: "./a.csv"
+    fields:
+      - name: x
+        source: "X"
+        type: string
+        db: { table: t, column: x }
+  - name: b
+    type: spreadsheet
+    path: "./b.csv"
+    fields:
+      - name: y
+        source: "Y"
+        type: string
+        db: { table: t, column: y }
+joins:
+  - left: a
+    right: b
+    "on": x
+database: { url: "sqlite:///t.db" }
+schema:
+  tables:
+    t: { primary_key: { column: id, type: auto_increment } }
+pipeline: { review: false }
+"""
+    p = tmp_path / "siphon.yaml"
+    p.write_text(yaml)
+    from siphon.config.loader import load_config
+    cfg = load_config(p)
+    assert cfg.joins is not None
+    assert cfg.joins[0].left == "a"
