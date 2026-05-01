@@ -215,6 +215,61 @@ pipeline:
 The audit table is only written when both `track_runs` and `audit` are true (the default). Audit writes happen in a separate transaction from the data inserts, so audit failures won't break the import.
 
 
+## Multi-Source Joins
+
+When data is split across multiple files (e.g., one CSV per shard, denormalized exports, or a primary file plus enrichment lookups), use `sources:` to declare each input and `joins:` to combine them.
+
+```yaml
+sources:
+  - name: companies
+    type: spreadsheet
+    path: "./companies.csv"
+    fields:
+      - name: company_name
+        source: "Name"
+        type: string
+        db: { table: companies, column: name }
+      - name: company_code
+        source: "Code"
+        type: string
+
+  - name: addresses
+    type: spreadsheet
+    path: "./addresses.csv"
+    fields:
+      - name: address
+        source: "Street Address"
+        type: string
+        db: { table: addresses, column: full_address }
+      - name: company_code
+        source: "Company Code"
+        type: string
+
+joins:
+  - left: companies
+    right: addresses
+    "on": company_code
+    type: left          # left | inner
+
+schema:
+  tables:
+    companies: { primary_key: { column: id, type: auto_increment } }
+    addresses: { primary_key: { column: id, type: auto_increment } }
+```
+
+**Join types:**
+- `left` (default) — keep all left rows; right fields are NULL where no match exists
+- `inner` — drop left rows that have no matching right row
+
+**Multiple joins:** Process in order. The first join's output becomes the running merged dataset; later joins extend it. Useful for one base source enriched by N lookup sources.
+
+**Path handling:** When using `sources:`, each source declares its own `path:` in YAML. The CLI argument `siphon run <input_path>` is optional and ignored. Paths support `${ENV_VAR}` substitution.
+
+**Cardinality:** A 1-to-many join produces N merged rows (one per right match). Configure `deduplication.key:` on the left-side fields if you want one row per distinct key in the target tables.
+
+**Backward compatible:** Single-source configs (`source:` + top-level `schema.fields:`) continue to work unchanged.
+
+
 ## Transforms
 
 Built-in transforms can be applied inline on any field:
