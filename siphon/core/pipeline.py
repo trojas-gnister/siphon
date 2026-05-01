@@ -80,6 +80,7 @@ class Pipeline:
         no_review: bool = False,
         create_tables: bool = False,
         sheet: str | int | None = None,
+        resume: bool = False,
     ) -> PipelineResult:
         """Execute the full pipeline.
 
@@ -89,6 +90,8 @@ class Pipeline:
             no_review: If True, skip HITL review.
             create_tables: If True, auto-create tables before insertion.
             sheet: Sheet name or 0-based index for multi-sheet Excel files.
+            resume: If True, look up the most recent failed run for this
+                pipeline+source+config and skip already-processed records.
 
         Returns:
             PipelineResult with counts and details.
@@ -309,9 +312,28 @@ class Pipeline:
 
             run_tracker = None
             run_id = None
+            records_to_insert = valid_records
+
             if self._config.pipeline.track_runs:
                 run_tracker = RunTracker(db_engine)
                 await run_tracker.create_runs_table()
+
+                if resume:
+                    resumable = await run_tracker.find_resumable_run(
+                        pipeline_name=self._config.name,
+                        source_file=str(input_path),
+                        config_hash=self._config_hash(),
+                    )
+                    if resumable is not None:
+                        skip_n = resumable.processed_count
+                        logger.info(
+                            "Resuming from run id=%s — skipping first %d records",
+                            resumable.id, skip_n,
+                        )
+                        records_to_insert = valid_records[skip_n:]
+                    else:
+                        logger.info("No resumable run found — running from start")
+
                 run_id = await run_tracker.start_run(
                     pipeline_name=self._config.name,
                     source_file=str(input_path),
@@ -321,11 +343,14 @@ class Pipeline:
 
             async def _on_batch(committed: int) -> None:
                 if run_tracker is not None and run_id is not None:
-                    await run_tracker.update_progress(run_id, committed)
+                    # processed_count is relative to the original valid_records,
+                    # so add the number of skipped records.
+                    skipped = len(valid_records) - len(records_to_insert)
+                    await run_tracker.update_progress(run_id, skipped + committed)
 
             try:
                 result.total_inserted = await inserter.insert(
-                    valid_records,
+                    records_to_insert,
                     target_tables=main_tables,
                     batch_size=self._config.pipeline.batch_size,
                     on_batch=_on_batch,

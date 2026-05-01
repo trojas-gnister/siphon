@@ -48,9 +48,11 @@ def _csv(tmp_path: Path, name: str, names: list[str]) -> Path:
 async def _query(db_url: str, sql: str):
     engine = create_async_engine(db_url)
     try:
-        async with engine.connect() as conn:
+        async with engine.begin() as conn:
             result = await conn.execute(text(sql))
-            return result.fetchall()
+            if result.returns_rows:
+                return result.fetchall()
+            return []
     finally:
         await engine.dispose()
 
@@ -106,3 +108,55 @@ class TestRunTrackingDisabled:
             await engine.dispose()
 
         assert "_siphon_runs" not in tables
+
+
+class TestResume:
+    async def test_resume_with_no_failed_run_inserts_all(self, tmp_path):
+        """resume=True with no prior failed run should behave like a fresh run."""
+        config_path = _config_yaml(tmp_path, batch_size=2)
+        csv_path = _csv(tmp_path, "data.csv", ["a", "b", "c"])
+        config = load_config(config_path)
+
+        result = await Pipeline(config).run(
+            csv_path, no_review=True, create_tables=True, resume=True
+        )
+        assert result.total_inserted == 3
+
+    async def test_resume_skips_already_processed_records(self, tmp_path):
+        """A simulated failed run sets processed_count; resume picks up after it."""
+        config_path = _config_yaml(tmp_path, batch_size=10)
+        csv_path = _csv(tmp_path, "data.csv", ["a", "b", "c", "d"])
+        config = load_config(config_path)
+
+        # Bootstrap: ensure the items + _siphon_runs tables exist by running once
+        await Pipeline(config).run(csv_path, no_review=True, create_tables=True)
+        # Wipe items so the resume actually inserts something
+        await _query(config.database.url, "DELETE FROM items")
+
+        # Simulate a previous failed run that processed 2 records
+        from siphon.db.engine import DatabaseEngine
+        from siphon.db.run_tracker import RunTracker
+
+        config2 = load_config(config_path)
+        engine = DatabaseEngine(config2.database)
+        tracker = RunTracker(engine)
+        await tracker.create_runs_table()
+        run_id = await tracker.start_run(
+            pipeline_name=config2.name,
+            source_file=str(csv_path),
+            total_records=4,
+            config_hash=Pipeline(config2)._config_hash(),
+        )
+        await tracker.update_progress(run_id, 2)
+        await tracker.fail_run(run_id, "simulated")
+        await engine.dispose()
+
+        # Resume — should skip the first 2 and insert the last 2
+        result = await Pipeline(load_config(config_path)).run(
+            csv_path, no_review=True, resume=True
+        )
+        assert result.total_inserted == 2
+
+        rows = await _query(config.database.url,
+                            "SELECT name FROM items ORDER BY name")
+        assert [r[0] for r in rows] == ["c", "d"]
