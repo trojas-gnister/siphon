@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 from collections import defaultdict
 from dataclasses import dataclass, field
@@ -16,6 +18,7 @@ from siphon.db.differ import Differ
 from siphon.db.engine import DatabaseEngine
 from siphon.db.inserter import Inserter
 from siphon.db.models import ModelGenerator
+from siphon.db.run_tracker import RunTracker
 from siphon.sources.spreadsheet import SpreadsheetLoader
 from siphon.sources.xml import XMLLoader
 from siphon.transforms.loader import load_custom_transforms
@@ -49,6 +52,15 @@ class Pipeline:
 
     def __init__(self, config: SiphonConfig) -> None:
         self._config = config
+
+    def _config_hash(self) -> str:
+        """Stable SHA-256 hash of the config (excluding fields that don't affect data)."""
+        payload = self._config.model_dump(by_alias=True, mode="json")
+        # Remove fields that don't affect data — log_level, log_dir, etc.
+        payload.get("pipeline", {}).pop("log_level", None)
+        payload.get("pipeline", {}).pop("log_dir", None)
+        serialized = json.dumps(payload, sort_keys=True, default=str)
+        return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
 
     @staticmethod
     def _scan_directory(directory: Path) -> list[Path]:
@@ -294,9 +306,37 @@ class Pipeline:
 
             # 11. Insert main records (target only top-level field tables)
             main_tables = {f.db.table for f in self._config.schema_.fields}
-            result.total_inserted = await inserter.insert(
-                valid_records, target_tables=main_tables
-            )
+
+            run_tracker = None
+            run_id = None
+            if self._config.pipeline.track_runs:
+                run_tracker = RunTracker(db_engine)
+                await run_tracker.create_runs_table()
+                run_id = await run_tracker.start_run(
+                    pipeline_name=self._config.name,
+                    source_file=str(input_path),
+                    total_records=len(valid_records),
+                    config_hash=self._config_hash(),
+                )
+
+            async def _on_batch(committed: int) -> None:
+                if run_tracker is not None and run_id is not None:
+                    await run_tracker.update_progress(run_id, committed)
+
+            try:
+                result.total_inserted = await inserter.insert(
+                    valid_records,
+                    target_tables=main_tables,
+                    batch_size=self._config.pipeline.batch_size,
+                    on_batch=_on_batch,
+                )
+            except Exception as e:
+                if run_tracker is not None and run_id is not None:
+                    await run_tracker.fail_run(run_id, str(e))
+                raise
+
+            if run_tracker is not None and run_id is not None:
+                await run_tracker.complete_run(run_id)
 
             # 12. Insert collection records (if any)
             if all_collection_records and self._config.schema_.collections:
