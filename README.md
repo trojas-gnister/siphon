@@ -181,6 +181,40 @@ pipeline:
 - Resume tracks main records only — collection records (from XML/JSON nested arrays) are re-processed on resume.
 
 
+## Audit Trail
+
+Every record-level action (insert, update, skip) is logged in a `_siphon_audit` table. Use `--user NAME` to attribute imports to a person:
+
+```bash
+siphon run data.csv --user alice
+```
+
+Then anyone can answer "what got imported when, and by whom?" with a SQL query:
+
+```sql
+SELECT target_table, action, target_pk, reviewed_by, created_at
+FROM _siphon_audit
+WHERE created_at > '2026-04-01';
+```
+
+**What gets logged:**
+- Every insert: target table, PK, source file, source row number
+- Every update (from upserts): JSON of field-level changes (`{"col": {"old": ..., "new": ...}}`)
+- Every skip (when `on_conflict.action: skip`): target table and PK
+- The `--user NAME` value (or NULL if not provided)
+- The `run_id` from `_siphon_runs` for cross-referencing
+
+**No-op updates are not audited.** If an upsert results in zero field changes, no audit row is written — only meaningful changes are recorded.
+
+**Configuration:**
+```yaml
+pipeline:
+  audit: true       # default — disable with `audit: false`
+```
+
+The audit table is only written when both `track_runs` and `audit` are true (the default). Audit writes happen in a separate transaction from the data inserts, so audit failures won't break the import.
+
+
 ## Transforms
 
 Built-in transforms can be applied inline on any field:
