@@ -306,9 +306,10 @@ class TestFieldConfig:
         with pytest.raises(ValidationError):
             FieldConfig(type="string", db=FieldDBConfig(table="t", column="c"))
 
-    def test_missing_db_rejected(self):
-        with pytest.raises(ValidationError):
-            FieldConfig(name="x", type="string")
+    def test_missing_db_allowed(self):
+        """db is optional — join-key fields may omit it."""
+        f = FieldConfig(name="x", type="string")
+        assert f.db is None
 
     def test_constraint_ordering_min_gt_max(self):
         with pytest.raises(ValidationError, match="min.*must be <= max"):

@@ -21,6 +21,10 @@ class SourceConfig(BaseModel):
     root: str | None = None  # For XML/JSON: dot-path to record list
     encoding: str = "utf-8"  # For XML
     force_list: list[str] | None = None  # For XML: elements to force as lists
+    # Multi-source fields (required when used inside a sources: list)
+    name: str | None = None
+    path: str | None = None
+    fields: "list[FieldConfig] | None" = None
 
 
 class DatabaseConfig(BaseModel):
@@ -75,7 +79,7 @@ class FieldConfig(BaseModel):
     aliases: list[str] | None = None  # Alternative source column names
     transform: TransformFieldConfig | None = None  # Inline transform
     value: Any | None = None  # Constant value (str, int, bool, etc.)
-    db: FieldDBConfig
+    db: FieldDBConfig | None = None
     required: bool = False
 
     # String constraints
@@ -113,6 +117,10 @@ class FieldConfig(BaseModel):
                 f"field '{self.name}': min_length ({self.min_length}) must be <= max_length ({self.max_length})"
             )
         return self
+
+
+# SourceConfig references FieldConfig via a forward ref; rebuild now that FieldConfig exists.
+SourceConfig.model_rebuild()
 
 
 class CollectionConfig(BaseModel):
@@ -224,7 +232,7 @@ class SchemaConfig(BaseModel):
 
     model_config = ConfigDict(populate_by_name=True)
 
-    fields: list[FieldConfig]
+    fields: list[FieldConfig] | None = None
     collections: list[CollectionConfig] | None = None
     tables: dict[str, TableConfig]
     deduplication: DeduplicationConfig | None = None
@@ -250,6 +258,22 @@ class PipelineConfig(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Join config
+# ---------------------------------------------------------------------------
+
+
+class JoinConfig(BaseModel):
+    """Describes how to merge two named sources by a shared key."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    left: str
+    right: str
+    on: str
+    type: Literal["left", "inner"] = "left"
+
+
+# ---------------------------------------------------------------------------
 # Top-level config
 # ---------------------------------------------------------------------------
 
@@ -260,7 +284,9 @@ class SiphonConfig(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
     name: str
-    source: SourceConfig
+    source: SourceConfig | None = None
+    sources: list[SourceConfig] | None = None
+    joins: list[JoinConfig] | None = None
     database: DatabaseConfig
 
     # 'schema' is a Python built-in — alias maps the YAML key to schema_
@@ -272,14 +298,50 @@ class SiphonConfig(BaseModel):
     pipeline: PipelineConfig = Field(default_factory=PipelineConfig)
 
     @model_validator(mode="after")
+    def validate_source_form(self) -> "SiphonConfig":
+        """Enforce exactly one of `source` (singular) or `sources` (plural)."""
+        has_single = self.source is not None
+        has_multi = self.sources is not None and len(self.sources) > 0
+
+        if has_single and has_multi:
+            raise ValueError(
+                "Config must use either `source:` or `sources:`, not both."
+            )
+        if not has_single and not has_multi:
+            raise ValueError(
+                "Config must declare either `source:` or `sources:`."
+            )
+
+        if has_multi:
+            # Each source must declare name + fields when in a list
+            seen_names: set[str] = set()
+            for src in self.sources:
+                if not src.name:
+                    raise ValueError(
+                        "Each source in `sources:` must declare a `name`."
+                    )
+                if src.name in seen_names:
+                    raise ValueError(
+                        f"Duplicate source name '{src.name}' in `sources:`."
+                    )
+                seen_names.add(src.name)
+                if not src.fields:
+                    raise ValueError(
+                        f"Source '{src.name}' must declare `fields:`."
+                    )
+
+        return self
+
+    @model_validator(mode="after")
     def cross_validate_references(self) -> "SiphonConfig":
         """Ensure every field's db.table and relationship tables exist in schema.tables."""
         known_tables = set(self.schema_.tables.keys())
-        known_field_names = {f.name for f in self.schema_.fields}
+        schema_fields = self.schema_.fields or []
+        known_field_names = {f.name for f in schema_fields}
 
         # Validate field table references
-        for field in self.schema_.fields:
-            if field.db.table not in known_tables:
+        for field in schema_fields:
+            if field.db is not None and field.db.table not in known_tables:
                 raise ValueError(
                     f"field '{field.name}' references unknown table '{field.db.table}'; "
                     f"known tables: {sorted(known_tables)}"
@@ -289,7 +351,7 @@ class SiphonConfig(BaseModel):
         if self.schema_.collections:
             for collection in self.schema_.collections:
                 for field in collection.fields:
-                    if field.db.table not in known_tables:
+                    if field.db is not None and field.db.table not in known_tables:
                         raise ValueError(
                             f"collection '{collection.name}' field '{field.name}' "
                             f"references unknown table '{field.db.table}'; "
