@@ -1070,3 +1070,15 @@ class TestPipelineConfigBatchAndTracking:
         from siphon.config.schema import PipelineConfig
         with pytest.raises(ValidationError):
             PipelineConfig(batch_size=-1)
+
+
+class TestPipelineConfigAudit:
+    def test_default_audit_is_true(self):
+        from siphon.config.schema import PipelineConfig
+        cfg = PipelineConfig()
+        assert cfg.audit is True
+
+    def test_audit_can_be_disabled(self):
+        from siphon.config.schema import PipelineConfig
+        cfg = PipelineConfig(audit=False)
+        assert cfg.audit is False

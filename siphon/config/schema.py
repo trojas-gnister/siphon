@@ -246,6 +246,7 @@ class PipelineConfig(BaseModel):
     log_dir: str | None = None
     batch_size: int = Field(default=500, gt=0)
     track_runs: bool = True
+    audit: bool = True
 
 
 # ---------------------------------------------------------------------------
