@@ -1,5 +1,6 @@
 """Relationship-aware record inserter with topological sort for the Siphon ETL pipeline."""
 
+import asyncio
 import logging
 import uuid
 from collections import defaultdict
@@ -28,7 +29,8 @@ class Inserter:
     - FK resolution via a lookup cache
     - Junction row insertion
     - UUID PK generation
-    - Single transaction with full rollback on failure
+    - One transaction per batch (configurable via ``batch_size``); failing
+      batch rolls back, previously committed batches persist.
     """
 
     def __init__(
@@ -144,17 +146,29 @@ class Inserter:
 
         return sorted_records
 
-    async def insert(self, records: list[dict], *, target_tables: set[str] | None = None) -> int:
-        """Insert all records in a single transaction.
+    async def insert(
+        self,
+        records: list[dict],
+        *,
+        target_tables: set[str] | None = None,
+        batch_size: int | None = None,
+        on_batch=None,
+    ) -> int:
+        """Insert records, optionally in batches with a per-batch progress callback.
 
         Args:
             records: List of mapped record dicts.
             target_tables: If provided, only insert into these tables.
                           Used for collection records that should only go
                           into their specific child table(s).
+            batch_size: If set, commit every N records in a separate transaction.
+                        If None, all records committed in one transaction (v2 behavior).
+            on_batch: Optional callable invoked after each successful batch commit
+                      with the cumulative committed count. Sync or async — both supported.
 
-        Returns number of records inserted.
-        Raises DatabaseError on failure (entire batch rolled back).
+        Returns total number of records inserted across all batches.
+        Raises DatabaseError on failure (the failing batch is rolled back; previously
+        committed batches are NOT rolled back).
         """
         table_order = self.topological_sort()
         if target_tables is not None:
@@ -190,85 +204,33 @@ class Inserter:
             r for r in self._config.relationships if isinstance(r, BelongsToRelationship)
         ]
 
+        # Empty input: return immediately without invoking the callback.
+        if not records:
+            logger.info("Inserted 0 records")
+            return 0
+
+        # Determine batch size — None or invalid means "all at once"
+        if batch_size and batch_size > 0:
+            effective_batch = batch_size
+        else:
+            effective_batch = len(records)
+
         inserted_count = 0
-
-        async with self._db.session() as session:
+        for batch_start in range(0, len(records), effective_batch):
+            batch = records[batch_start : batch_start + effective_batch]
             try:
-                async with session.begin():
-                    for record in records:
-                        # Track inserted IDs for this record per table
-                        record_ids: dict[str, any] = {}
-
-                        for table_name in table_order:
-                            model = self._models[table_name]
-                            pk_config = self._config.schema_.tables[table_name].primary_key
-
-                            # Build row data from record fields mapped to this table
-                            row_data = {}
-                            for field in table_fields.get(table_name, []):
-                                value = record.get(field.name)
-                                if value is not None:
-                                    row_data[field.db.column] = value
-
-                            # Generate UUID if needed
-                            if pk_config.type == "uuid":
-                                row_data[pk_config.column] = str(uuid.uuid4())
-
-                            # Resolve belongs_to FK values
-                            for rel in belongs_tos:
-                                if rel.table == table_name:
-                                    ref_value = record.get(rel.field)
-                                    if ref_value:
-                                        fk_value = self._lookup_cache.get(
-                                            rel.references, {}
-                                        ).get(ref_value)
-                                        if fk_value is not None:
-                                            row_data[rel.fk_column] = fk_value
-
-                            # Skip if no data columns for an auto_increment table
-                            if not row_data and pk_config.type == "auto_increment":
-                                continue
-
-                            table_cfg = self._config.schema_.tables[table_name]
-                            if table_cfg.on_conflict is None or table_cfg.on_conflict.action == "error":
-                                # No upsert configured (or action=error) — use ORM insert as before
-                                instance = model(**row_data)
-                                session.add(instance)
-                                await session.flush()
-                                pk_value = getattr(instance, pk_config.column)
-                            else:
-                                # Upsert path
-                                pk_value = await self._execute_upsert(
-                                    session, model, table_name, row_data, pk_config, table_cfg.on_conflict
-                                )
-
-                            record_ids[table_name] = pk_value
-
-                            # Update lookup cache for belongs_to resolution
-                            for rel in belongs_tos:
-                                if rel.references == table_name:
-                                    resolve_col = rel.resolve_by
-                                    resolve_val = row_data.get(resolve_col)
-                                    if resolve_val:
-                                        self._lookup_cache[table_name][resolve_val] = pk_value
-
-                        # Insert junction rows
-                        for junc in junctions:
-                            t1, t2 = junc.link
-                            if t1 in record_ids and t2 in record_ids:
-                                junc_model = self._models[junc.through]
-                                junc_row = junc_model(
-                                    **{
-                                        junc.columns[t1]: record_ids[t1],
-                                        junc.columns[t2]: record_ids[t2],
-                                    }
-                                )
-                                session.add(junc_row)
-
-                        inserted_count += 1
-
-                    # Transaction commits at end of `async with session.begin()`
-
+                async with self._db.session() as session:
+                    async with session.begin():
+                        for record in batch:
+                            await self._insert_one_record(
+                                session,
+                                record,
+                                table_order,
+                                table_fields,
+                                junctions,
+                                belongs_tos,
+                            )
+                        # Transaction commits at end of `async with session.begin()`
             except DatabaseError:
                 raise
             except Exception as e:
@@ -276,8 +238,97 @@ class Inserter:
                     f"Insertion failed, transaction rolled back: {e}"
                 ) from e
 
+            inserted_count += len(batch)
+            if on_batch is not None:
+                res = on_batch(inserted_count)
+                if asyncio.iscoroutine(res):
+                    await res
+
         logger.info(f"Inserted {inserted_count} records")
         return inserted_count
+
+    async def _insert_one_record(
+        self,
+        session,
+        record: dict,
+        table_order: list[str],
+        table_fields: dict,
+        junctions: list,
+        belongs_tos: list,
+    ) -> None:
+        """Insert a single record across all relevant tables and junctions.
+
+        Mutates ``self._lookup_cache`` and uses the provided session. Caller
+        is responsible for transaction boundaries.
+        """
+        # Track inserted IDs for this record per table
+        record_ids: dict[str, any] = {}
+
+        for table_name in table_order:
+            model = self._models[table_name]
+            pk_config = self._config.schema_.tables[table_name].primary_key
+
+            # Build row data from record fields mapped to this table
+            row_data = {}
+            for field in table_fields.get(table_name, []):
+                value = record.get(field.name)
+                if value is not None:
+                    row_data[field.db.column] = value
+
+            # Generate UUID if needed
+            if pk_config.type == "uuid":
+                row_data[pk_config.column] = str(uuid.uuid4())
+
+            # Resolve belongs_to FK values
+            for rel in belongs_tos:
+                if rel.table == table_name:
+                    ref_value = record.get(rel.field)
+                    if ref_value:
+                        fk_value = self._lookup_cache.get(
+                            rel.references, {}
+                        ).get(ref_value)
+                        if fk_value is not None:
+                            row_data[rel.fk_column] = fk_value
+
+            # Skip if no data columns for an auto_increment table
+            if not row_data and pk_config.type == "auto_increment":
+                continue
+
+            table_cfg = self._config.schema_.tables[table_name]
+            if table_cfg.on_conflict is None or table_cfg.on_conflict.action == "error":
+                # No upsert configured (or action=error) — use ORM insert as before
+                instance = model(**row_data)
+                session.add(instance)
+                await session.flush()
+                pk_value = getattr(instance, pk_config.column)
+            else:
+                # Upsert path
+                pk_value = await self._execute_upsert(
+                    session, model, table_name, row_data, pk_config, table_cfg.on_conflict
+                )
+
+            record_ids[table_name] = pk_value
+
+            # Update lookup cache for belongs_to resolution
+            for rel in belongs_tos:
+                if rel.references == table_name:
+                    resolve_col = rel.resolve_by
+                    resolve_val = row_data.get(resolve_col)
+                    if resolve_val:
+                        self._lookup_cache[table_name][resolve_val] = pk_value
+
+        # Insert junction rows for this record
+        for junc in junctions:
+            t1, t2 = junc.link
+            if t1 in record_ids and t2 in record_ids:
+                junc_model = self._models[junc.through]
+                junc_row = junc_model(
+                    **{
+                        junc.columns[t1]: record_ids[t1],
+                        junc.columns[t2]: record_ids[t2],
+                    }
+                )
+                session.add(junc_row)
 
     async def _execute_upsert(
         self,
