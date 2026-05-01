@@ -14,6 +14,7 @@ from siphon.core.mapper import Mapper
 from siphon.core.review_cli import ReviewCLI
 from siphon.core.reviewer import ReviewBatch, ReviewStatus
 from siphon.core.validator import Validator
+from siphon.db.audit import AuditLogger
 from siphon.db.differ import Differ
 from siphon.db.engine import DatabaseEngine
 from siphon.db.inserter import Inserter
@@ -81,6 +82,7 @@ class Pipeline:
         create_tables: bool = False,
         sheet: str | int | None = None,
         resume: bool = False,
+        user: str | None = None,
     ) -> PipelineResult:
         """Execute the full pipeline.
 
@@ -341,6 +343,20 @@ class Pipeline:
                     config_hash=self._config_hash(),
                 )
 
+            audit_logger = None
+            if (
+                self._config.pipeline.track_runs
+                and self._config.pipeline.audit
+                and run_id is not None
+            ):
+                audit_logger = AuditLogger(
+                    db_engine,
+                    run_id=run_id,
+                    source_file=str(input_path),
+                    reviewed_by=user,
+                )
+                await audit_logger.create_audit_table()
+
             async def _on_batch(committed: int) -> None:
                 if run_tracker is not None and run_id is not None:
                     # processed_count is relative to the original valid_records,
@@ -354,6 +370,7 @@ class Pipeline:
                     target_tables=main_tables,
                     batch_size=self._config.pipeline.batch_size,
                     on_batch=_on_batch,
+                    audit_logger=audit_logger,
                 )
             except Exception as e:
                 if run_tracker is not None and run_id is not None:
