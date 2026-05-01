@@ -92,15 +92,10 @@ def _validate_field(field: Any, config: "SiphonConfig", context: str = "") -> No
         )
 
 
-def _cross_validate(config: SiphonConfig) -> None:
-    """Apply cross-validation rules that depend on field `type`.
-
-    Validates both top-level schema fields and fields inside collections.
-    Raises ConfigError for any violation.
-    """
-    schema_fields = config.schema_.fields or []
-
-    for field in schema_fields:
+def _validate_field_type_requirements(config: SiphonConfig) -> None:
+    """Enforce that enum needs values/preset, regex needs pattern,
+    subdivision needs country_code, and custom transforms have a file."""
+    for field in config.schema_.fields or []:
         _validate_field(field, config)
 
     if config.schema_.collections:
@@ -108,8 +103,10 @@ def _cross_validate(config: SiphonConfig) -> None:
             for field in collection.fields:
                 _validate_field(field, config, context=f"In collection '{collection.name}', ")
 
-    # Validate on_conflict.key references known field names
-    known_field_names = {f.name for f in schema_fields}
+
+def _validate_on_conflict_keys(config: SiphonConfig) -> None:
+    """Validate that on_conflict.key entries reference real schema fields."""
+    known_field_names = {f.name for f in config.schema_.fields or []}
     if config.schema_.collections:
         for collection in config.schema_.collections:
             for field in collection.fields:
@@ -125,20 +122,33 @@ def _cross_validate(config: SiphonConfig) -> None:
                     f"field '{key_field}'. Known fields: {sorted(known_field_names)}"
                 )
 
-    # Validate join.left and join.right reference real sources
-    if config.sources and config.joins:
-        source_names = {s.name for s in config.sources}
-        for i, j in enumerate(config.joins):
-            if j.left not in source_names:
-                raise ConfigError(
-                    f"join[{i}].left='{j.left}' is not a declared source. "
-                    f"Known sources: {sorted(source_names)}"
-                )
-            if j.right not in source_names:
-                raise ConfigError(
-                    f"join[{i}].right='{j.right}' is not a declared source. "
-                    f"Known sources: {sorted(source_names)}"
-                )
+
+def _validate_join_source_references(config: SiphonConfig) -> None:
+    """Validate join.left and join.right reference declared sources."""
+    if not (config.sources and config.joins):
+        return
+    source_names = {s.name for s in config.sources}
+    for i, j in enumerate(config.joins):
+        if j.left not in source_names:
+            raise ConfigError(
+                f"join[{i}].left='{j.left}' is not a declared source. "
+                f"Known sources: {sorted(source_names)}"
+            )
+        if j.right not in source_names:
+            raise ConfigError(
+                f"join[{i}].right='{j.right}' is not a declared source. "
+                f"Known sources: {sorted(source_names)}"
+            )
+
+
+def _cross_validate(config: SiphonConfig) -> None:
+    """Apply cross-validation rules that depend on multiple config fields.
+
+    Raises ConfigError for any violation.
+    """
+    _validate_field_type_requirements(config)
+    _validate_on_conflict_keys(config)
+    _validate_join_source_references(config)
 
 
 def load_config(path: str | Path) -> SiphonConfig:
