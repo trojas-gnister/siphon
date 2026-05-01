@@ -261,6 +261,45 @@ class Inserter:
         logger.info(f"Inserted {inserted_count} records")
         return inserted_count
 
+    def _build_row_data_for_table(
+        self,
+        record: dict,
+        table_name: str,
+        pk_config,
+        table_fields: dict,
+        belongs_tos: list,
+    ) -> dict:
+        """Build the row dict for a single table from a single mapped record.
+
+        Includes:
+        - Field values mapped to this table (via field.db.column)
+        - A generated UUID if the PK type is uuid
+        - Resolved FK values for belongs_to relationships pointing to this table
+        """
+        # Build row data from record fields mapped to this table
+        row_data: dict = {}
+        for field in table_fields.get(table_name, []):
+            value = record.get(field.name)
+            if value is not None:
+                row_data[field.db.column] = value
+
+        # Generate UUID if needed
+        if pk_config.type == "uuid":
+            row_data[pk_config.column] = str(uuid.uuid4())
+
+        # Resolve belongs_to FK values
+        for rel in belongs_tos:
+            if rel.table == table_name:
+                ref_value = record.get(rel.field)
+                if ref_value:
+                    fk_value = self._lookup_cache.get(
+                        rel.references, {}
+                    ).get(ref_value)
+                    if fk_value is not None:
+                        row_data[rel.fk_column] = fk_value
+
+        return row_data
+
     async def _insert_one_record(
         self,
         session,
@@ -283,27 +322,9 @@ class Inserter:
             model = self._models[table_name]
             pk_config = self._config.schema_.tables[table_name].primary_key
 
-            # Build row data from record fields mapped to this table
-            row_data = {}
-            for field in table_fields.get(table_name, []):
-                value = record.get(field.name)
-                if value is not None:
-                    row_data[field.db.column] = value
-
-            # Generate UUID if needed
-            if pk_config.type == "uuid":
-                row_data[pk_config.column] = str(uuid.uuid4())
-
-            # Resolve belongs_to FK values
-            for rel in belongs_tos:
-                if rel.table == table_name:
-                    ref_value = record.get(rel.field)
-                    if ref_value:
-                        fk_value = self._lookup_cache.get(
-                            rel.references, {}
-                        ).get(ref_value)
-                        if fk_value is not None:
-                            row_data[rel.fk_column] = fk_value
+            row_data = self._build_row_data_for_table(
+                record, table_name, pk_config, table_fields, belongs_tos,
+            )
 
             # Skip if no data columns for an auto_increment table
             if not row_data and pk_config.type == "auto_increment":
