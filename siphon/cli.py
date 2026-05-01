@@ -46,7 +46,9 @@ def main(
 
 @app.command()
 def run(
-    input_path: str = typer.Argument(..., help="Path to spreadsheet file or directory"),
+    input_path: Optional[str] = typer.Argument(
+        None, help="Path to spreadsheet file or directory (required for single-source configs)"
+    ),
     config: Path = typer.Option(Path("siphon.yaml"), "--config", "-c", help="Path to YAML config"),
     create_tables: bool = typer.Option(False, "--create-tables", help="Auto-create tables if they don't exist"),
     dry_run: bool = typer.Option(False, "--dry-run", help="Extract + validate only, no DB insertion"),
@@ -72,10 +74,22 @@ def run(
         if batch_size is not None:
             cfg.pipeline.batch_size = batch_size
 
+        if cfg.sources is None and not input_path:
+            console.print(
+                "[red]Error:[/red] input_path is required when not using a multi-source (`sources:`) config"
+            )
+            raise typer.Exit(code=1)
+
+        if cfg.sources is not None and input_path:
+            console.print(
+                "[yellow]Warning:[/yellow] input_path ignored — multi-source configs use paths from YAML"
+            )
+            input_path = None
+
         pipeline = Pipeline(cfg)
         result = asyncio.run(
             pipeline.run(
-                input_path,
+                input_path or "",
                 dry_run=dry_run,
                 no_review=no_review,
                 create_tables=create_tables,
