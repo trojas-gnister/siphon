@@ -129,47 +129,31 @@ class Pipeline:
                 files.append(f)
         return files
 
-    async def run(
+    async def _load_and_map_records(
         self,
         input_path: str | Path,
-        *,
-        dry_run: bool = False,
-        no_review: bool = False,
-        create_tables: bool = False,
-        sheet: str | int | None = None,
-        resume: bool = False,
-        user: str | None = None,
-    ) -> PipelineResult:
-        """Execute the full pipeline.
+        sheet: str | int | None,
+    ) -> tuple[list[dict], dict[str, list[dict]], str]:
+        """Load source data, map to target schema, apply joins.
 
-        Args:
-            input_path: Path to source file or directory of source files.
-            dry_run: If True, load + map + validate only, no DB insertion.
-            no_review: If True, skip HITL review.
-            create_tables: If True, auto-create tables before insertion.
-            sheet: Sheet name or 0-based index for multi-sheet Excel files.
-            resume: If True, look up the most recent failed run for this
-                pipeline+source+config and skip already-processed records.
+        Handles both single-source and multi-source modes. For multi-source,
+        mutates self._config.schema_.fields to the flat union view so downstream
+        components work unchanged.
 
-        Returns:
-            PipelineResult with counts and details.
+        Logs the same "no records" warnings as the original inline block when
+        loading or mapping yields zero records; the caller is expected to
+        short-circuit on an empty records list.
+
+        Returns (records, all_collection_records, effective_input_path).
         """
-        # 1. Setup logging
-        setup_logging(
-            self._config.pipeline.log_level,
-            self._config.pipeline.log_dir,
-        )
-
-        result = PipelineResult(dry_run=dry_run)
-
-        # 2. Load custom transforms (if configured)
+        # Load custom transforms (if configured)
         custom_transforms: dict[str, callable] = {}
         if self._config.transforms and self._config.transforms.file:
             custom_transforms = load_custom_transforms(
                 self._config.transforms.file
             )
 
-        # 3. Load source data — dispatch on single-source vs multi-source
+        # Load source data — dispatch on single-source vs multi-source
         if self._config.sources:
             # ===== MULTI-SOURCE MODE =====
             from siphon.core.joiner import join_records
@@ -217,8 +201,6 @@ class Pipeline:
                 for src_records in mapped_per_source.values():
                     records.extend(src_records)
 
-            result.total_extracted = len(records)
-
             # Multi-source mode does not support collections (collections are
             # for nested XML/JSON within a single source).
             all_collection_records: dict[str, list[dict]] = defaultdict(list)
@@ -232,7 +214,7 @@ class Pipeline:
 
             if not records:
                 logger.warning("No records after mapping — nothing to process")
-                return result
+                return records, all_collection_records, effective_input_path
 
         else:
             # ===== SINGLE-SOURCE MODE — existing behaviour =====
@@ -247,7 +229,7 @@ class Pipeline:
                         logger.warning(
                             "No supported files found in %s", input_path
                         )
-                        return result
+                        return [], defaultdict(list), str(input_path)
 
                     source_records: list[dict] = []
                     for f in files:
@@ -273,26 +255,68 @@ class Pipeline:
 
             if not source_records:
                 logger.warning("No records loaded — nothing to process")
-                return result
+                return [], defaultdict(list), str(input_path)
 
-            # 4. Map source records to target schema
+            # Map source records to target schema
             mapper = Mapper(self._config, custom_transforms)
             records = mapper.map_records(source_records)
-            result.total_extracted = len(records)
 
-            # 5. Map collections (if any)
-            all_collection_records: dict[str, list[dict]] = defaultdict(list)
+            # Map collections (if any)
+            all_collection_records = defaultdict(list)
             if self._config.schema_.collections:
                 for source_rec, mapped_rec in zip(source_records, records):
                     collections = mapper.map_collections(source_rec, mapped_rec)
                     for name, items in collections.items():
                         all_collection_records[name].extend(items)
 
+            effective_input_path = str(input_path)
+
             if not records:
                 logger.warning("No records after mapping — nothing to process")
-                return result
+                return records, all_collection_records, effective_input_path
 
-            effective_input_path = str(input_path)
+        return records, all_collection_records, effective_input_path
+
+    async def run(
+        self,
+        input_path: str | Path,
+        *,
+        dry_run: bool = False,
+        no_review: bool = False,
+        create_tables: bool = False,
+        sheet: str | int | None = None,
+        resume: bool = False,
+        user: str | None = None,
+    ) -> PipelineResult:
+        """Execute the full pipeline.
+
+        Args:
+            input_path: Path to source file or directory of source files.
+            dry_run: If True, load + map + validate only, no DB insertion.
+            no_review: If True, skip HITL review.
+            create_tables: If True, auto-create tables before insertion.
+            sheet: Sheet name or 0-based index for multi-sheet Excel files.
+            resume: If True, look up the most recent failed run for this
+                pipeline+source+config and skip already-processed records.
+
+        Returns:
+            PipelineResult with counts and details.
+        """
+        # 1. Setup logging
+        setup_logging(
+            self._config.pipeline.log_level,
+            self._config.pipeline.log_dir,
+        )
+
+        result = PipelineResult(dry_run=dry_run)
+
+        # 2-3. Load source data + map records (single-source or multi-source).
+        records, all_collection_records, effective_input_path = (
+            await self._load_and_map_records(input_path, sheet)
+        )
+        result.total_extracted = len(records)
+        if not records:
+            return result
 
         # 6. Validate main records
         logger.info("Validating %d records", len(records))
