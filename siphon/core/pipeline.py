@@ -277,6 +277,41 @@ class Pipeline:
 
         return records, all_collection_records, effective_input_path
 
+    async def _handle_dry_run(
+        self,
+        result: PipelineResult,
+        valid_records: list[dict],
+    ) -> None:
+        """Compute the dry-run diff and store it on result.
+
+        Does not perform any inserts. Mutates result.diff. Falls back to
+        "everything is an insert" if the diff computation raises (e.g., the
+        target DB does not exist yet).
+        """
+        # Compute the diff against current DB state.
+        # Note: this requires a DB connection and the model_gen, but
+        # never writes anything.
+        db_engine = DatabaseEngine(self._config.database)
+        try:
+            model_gen = ModelGenerator(self._config)
+            model_gen.generate()
+            differ = Differ(self._config, db_engine, model_gen)
+            try:
+                result.diff = await differ.compute_diff(valid_records)
+            except Exception as e:
+                # If the DB doesn't exist yet (e.g., create_tables=False
+                # and no DB), fall back to "everything is an insert".
+                logger.warning("Diff computation failed: %s", e)
+                result.diff = {
+                    "insert": list(valid_records),
+                    "update": [],
+                    "skip": [],
+                    "no_change": [],
+                }
+        finally:
+            await db_engine.dispose()
+        logger.info("Dry run complete — no database operations performed")
+
     async def run(
         self,
         input_path: str | Path,
@@ -391,29 +426,7 @@ class Pipeline:
 
         # 8. If dry_run, compute diff then return
         if dry_run:
-            # Compute the diff against current DB state.
-            # Note: this requires a DB connection and the model_gen, but
-            # never writes anything.
-            db_engine = DatabaseEngine(self._config.database)
-            try:
-                model_gen = ModelGenerator(self._config)
-                model_gen.generate()
-                differ = Differ(self._config, db_engine, model_gen)
-                try:
-                    result.diff = await differ.compute_diff(valid_records)
-                except Exception as e:
-                    # If the DB doesn't exist yet (e.g., create_tables=False
-                    # and no DB), fall back to "everything is an insert".
-                    logger.warning("Diff computation failed: %s", e)
-                    result.diff = {
-                        "insert": list(valid_records),
-                        "update": [],
-                        "skip": [],
-                        "no_change": [],
-                    }
-            finally:
-                await db_engine.dispose()
-            logger.info("Dry run complete — no database operations performed")
+            await self._handle_dry_run(result, valid_records)
             return result
 
         if not valid_records:
