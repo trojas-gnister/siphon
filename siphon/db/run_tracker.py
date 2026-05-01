@@ -11,6 +11,8 @@ from sqlalchemy import (
     Integer,
     String,
     Text,
+    select,
+    update,
 )
 from sqlalchemy.orm import DeclarativeBase
 
@@ -82,8 +84,6 @@ class RunTracker:
 
     async def update_progress(self, run_id: int, processed_count: int) -> None:
         """Update the processed_count for a run."""
-        from sqlalchemy import update
-
         async with self._db.session() as session:
             await session.execute(
                 update(SiphonRun)
@@ -94,8 +94,6 @@ class RunTracker:
 
     async def complete_run(self, run_id: int) -> None:
         """Mark a run as completed."""
-        from sqlalchemy import update
-
         async with self._db.session() as session:
             await session.execute(
                 update(SiphonRun)
@@ -109,8 +107,6 @@ class RunTracker:
 
     async def fail_run(self, run_id: int, error_message: str) -> None:
         """Mark a run as failed with an error message."""
-        from sqlalchemy import update
-
         async with self._db.session() as session:
             await session.execute(
                 update(SiphonRun)
@@ -125,8 +121,6 @@ class RunTracker:
 
     async def get_run(self, run_id: int) -> SiphonRun | None:
         """Fetch a run by id."""
-        from sqlalchemy import select
-
         async with self._db.session() as session:
             result = await session.execute(
                 select(SiphonRun).where(SiphonRun.id == run_id)
@@ -140,8 +134,6 @@ class RunTracker:
         config_hash: str,
     ) -> SiphonRun | None:
         """Return the most recent failed run for this pipeline+source+config, or None."""
-        from sqlalchemy import select
-
         async with self._db.session() as session:
             result = await session.execute(
                 select(SiphonRun)

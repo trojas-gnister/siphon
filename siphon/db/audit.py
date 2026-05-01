@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -113,7 +114,6 @@ class AuditLogger:
         if not self._buffer:
             return
 
-        import json
         now = datetime.now(timezone.utc)
         rows = [
             SiphonAudit(
