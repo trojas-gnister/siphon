@@ -1,56 +1,227 @@
-# Siphon — Configurable ETL Pipeline
+# Siphon
 
-Siphon is a YAML-driven ETL pipeline that loads spreadsheets and XML/JSON files, maps columns to a target schema, validates records, and inserts them into any SQLAlchemy-supported database. An optional human-in-the-loop review step lets you approve or reject records before they are committed.
-
-No LLM required — field mapping is declared directly in the config file.
-
-
-## Installation
-
-Requires Python 3.11 or later.
-
-```
-pip install siphon-etl
-```
-
-To use async database drivers (recommended):
-
-```
-# SQLite (for development/testing)
-pip install aiosqlite
-
-# PostgreSQL
-pip install asyncpg
-
-# MySQL
-pip install aiomysql
-```
-
+Configurable, YAML-driven ETL for spreadsheets and XML. Map source columns to your database schema, validate, dedupe, and insert — all with one config file and zero Python code (most of the time).
 
 ## Quickstart
 
-**1. Generate a starter config:**
+You have a CSV. You want it in your database. Here's the 5-minute walkthrough.
 
+### 1. Install
+
+```bash
+pip install siphon-etl
+# Plus your DB driver of choice:
+pip install aiosqlite          # for SQLite (testing)
+pip install asyncpg            # for PostgreSQL
+pip install aiomysql           # for MySQL
 ```
+
+### 2. Generate a starter config
+
+```bash
 siphon init
 ```
 
-This creates `siphon.yaml` in the current directory. Open it and configure your database, source, and schema.
+This writes a heavily-commented `siphon.yaml` to your current directory. Open it.
 
-**2. Validate your config:**
+### 3. Configure your import
 
+The config has three sections you'll edit:
+
+**Source** — what file to read:
+
+```yaml
+source:
+  type: spreadsheet     # or 'xml'
 ```
+
+**Database** — where to write:
+
+```yaml
+database:
+  url: "postgresql+asyncpg://user:pass@localhost/mydb"
+```
+
+**Schema** — how to map source columns to database tables:
+
+```yaml
+schema:
+  fields:
+    - name: company_name
+      source: "Company Name"        # the column header in your CSV
+      type: string
+      required: true
+      db:
+        table: companies            # the database table to insert into
+        column: name                # the database column to use
+  tables:
+    companies:
+      primary_key:
+        column: id
+        type: auto_increment
+```
+
+### 4. Validate the config
+
+```bash
 siphon validate
 ```
 
-**3. Run the pipeline:**
+Catches typos and structural errors without touching the database. Fix any errors it reports.
 
+### 5. Run a dry run
+
+```bash
+siphon run data.csv --dry-run
 ```
+
+Loads the source, validates each record, and shows you what WOULD be inserted — without writing anything. Use this to sanity-check before committing.
+
+### 6. Run for real
+
+```bash
 siphon run data.csv --create-tables
 ```
 
-Siphon will map, validate, and (after optional review) insert the records.
+`--create-tables` auto-creates any missing tables. Drop it once your schema is stable.
 
+That's it. For more, see the cookbook below or the reference sections.
+
+---
+
+## Cookbook
+
+Real-world configs that demonstrate common patterns. Copy these, adapt the field names, and you're 80% done.
+
+### Recipe 1: Import a CSV of customers (with deduplication)
+
+`customers.yaml`:
+
+```yaml
+name: customer-import
+source:
+  type: spreadsheet
+database:
+  url: "${DATABASE_URL}"
+
+schema:
+  fields:
+    - name: email
+      source: "Email"
+      aliases: ["Email Address", "E-mail"]
+      type: email
+      required: true
+      db: { table: customers, column: email }
+    - name: full_name
+      source: "Name"
+      aliases: ["Full Name", "Customer Name"]
+      type: string
+      required: true
+      db: { table: customers, column: name }
+    - name: phone
+      source: "Phone"
+      type: phone
+      db: { table: customers, column: phone }
+
+  tables:
+    customers:
+      primary_key: { column: id, type: auto_increment }
+
+  deduplication:
+    key: [email]
+    check_db: true              # also check existing DB rows
+    match: case_insensitive
+
+pipeline:
+  review: false
+```
+
+Run: `siphon run customers.csv --create-tables`
+
+### Recipe 2: Import customers + addresses from two CSVs (multi-source join)
+
+`customers_with_addresses.yaml`:
+
+```yaml
+name: customers-with-addresses
+
+sources:
+  - name: customers
+    type: spreadsheet
+    path: "./customers.csv"
+    fields:
+      - name: full_name
+        source: "Name"
+        type: string
+        required: true
+        db: { table: customers, column: name }
+      - name: customer_code
+        source: "Code"
+        type: string
+
+  - name: addresses
+    type: spreadsheet
+    path: "./addresses.csv"
+    fields:
+      - name: address
+        source: "Address"
+        type: string
+        db: { table: addresses, column: street }
+      - name: customer_code
+        source: "Customer Code"
+        type: string
+
+joins:
+  - left: customers
+    right: addresses
+    "on": customer_code           # bare 'on' is a YAML keyword — quote it
+    type: left
+
+database:
+  url: "${DATABASE_URL}"
+
+schema:
+  tables:
+    customers: { primary_key: { column: id, type: auto_increment } }
+    addresses: { primary_key: { column: id, type: auto_increment } }
+  deduplication:
+    key: [full_name]
+    match: case_insensitive
+
+relationships:
+  - type: junction
+    link: [customers, addresses]
+    through: customer_addresses
+    columns:
+      customers: customer_id
+      addresses: address_id
+
+pipeline:
+  review: false
+```
+
+Run: `siphon run --config customers_with_addresses.yaml --create-tables`
+
+(Note: with `sources:`, the CLI input path is optional — paths come from YAML.)
+
+### Recipe 3: Idempotent re-import with upserts (safe to re-run)
+
+When you receive an updated CSV every week and want to upsert (insert new rows, update existing ones):
+
+```yaml
+schema:
+  tables:
+    customers:
+      primary_key: { column: id, type: auto_increment }
+      on_conflict:
+        key: [email]              # match existing rows by email
+        action: update            # update | skip | error
+        update_columns: all       # all | [list of columns]
+```
+
+Now `siphon run new_data.csv` is idempotent — running it twice produces the same DB state as running it once.
+
+---
 
 ## Source Types
 
