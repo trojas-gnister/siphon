@@ -120,7 +120,8 @@ class Mapper:
                 from siphon.utils.errors import TransformError
 
                 raise TransformError(
-                    f"Custom transform '{transform.function}' not found"
+                    f"Custom transform function '{transform.function}' is not defined in the transforms file. "
+                    f"Add 'def {transform.function}(...):' to your transforms.py."
                 )
             # Resolve args from the record
             args = [record.get(a) for a in (transform.args or [])]
@@ -129,7 +130,10 @@ class Mapper:
         else:
             from siphon.utils.errors import TransformError
 
-            raise TransformError(f"Unknown transform type: {t}")
+            raise TransformError(
+                f"Unknown transform type: '{t}'. "
+                f"Built-in types: template, map, concat, uuid, now, coalesce, custom."
+            )
 
     def map_record(self, source_record: dict) -> dict:
         """Map a single source record to target field names.

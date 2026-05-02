@@ -69,13 +69,13 @@ class TestLoadCustomTransforms:
 
     def test_missing_file_raises_config_error(self, tmp_path):
         missing = tmp_path / "nonexistent.py"
-        with pytest.raises(ConfigError, match="Transform file not found"):
+        with pytest.raises(ConfigError, match="Transforms file not found"):
             load_custom_transforms(missing)
 
     def test_invalid_python_raises_config_error(self, tmp_path):
         bad = tmp_path / "bad_syntax.py"
         bad.write_text("def broken(\n    # unclosed paren\n")
-        with pytest.raises(ConfigError, match="Failed to load transform file"):
+        with pytest.raises(ConfigError, match="Failed to.*transform.*file"):
             load_custom_transforms(bad)
 
     def test_accepts_string_path(self, tmp_path):

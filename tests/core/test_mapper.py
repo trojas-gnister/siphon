@@ -262,7 +262,7 @@ def test_missing_custom_transform_raises():
         _field("x", transform={"type": "custom", "function": "nope", "args": []}),
     ]))
     mapper = Mapper(cfg)
-    with pytest.raises(TransformError, match="Custom transform 'nope' not found"):
+    with pytest.raises(TransformError, match="Custom transform.*nope.*not defined"):
         mapper.map_record({})
 
 
@@ -275,7 +275,7 @@ def test_unknown_transform_raises():
         _field("x", transform={"type": "bogus"}),
     ]))
     mapper = Mapper(cfg)
-    with pytest.raises(TransformError, match="Unknown transform type: bogus"):
+    with pytest.raises(TransformError, match="Unknown transform type.*bogus"):
         mapper.map_record({})
 
 

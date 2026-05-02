@@ -46,11 +46,17 @@ class SpreadsheetLoader:
                     path, dtype=str, engine="odf", sheet_name=sheet_arg
                 ).fillna("")
             else:
-                raise SourceError(f"Unsupported file format: {ext}")
+                raise SourceError(
+                    f"Unsupported source format: '{ext}' for file {path}. "
+                    f"Supported spreadsheet formats: .csv, .xlsx, .xls, .ods"
+                )
         except SourceError:
             raise
         except Exception as e:
-            raise SourceError(f"Failed to read {path}: {e}") from e
+            raise SourceError(
+                f"Failed to read {path}: {e}. "
+                f"Check the file isn't corrupted or open in another program."
+            ) from e
 
         logger.info("Loaded %d rows from %s", len(df), path.name)
         return df.to_dict(orient="records")

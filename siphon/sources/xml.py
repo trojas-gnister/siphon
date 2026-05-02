@@ -44,12 +44,18 @@ class XMLLoader:
         """
         path = Path(path)
         if not path.exists():
-            raise SourceError(f"File not found: {path}")
+            raise SourceError(
+                f"Source file not found: {path}. "
+                f"Check the file path is correct and the file exists."
+            )
 
         try:
             xml_string = path.read_text(encoding=self._encoding)
         except Exception as e:
-            raise SourceError(f"Failed to read {path}: {e}") from e
+            raise SourceError(
+                f"Failed to read {path}: {e}. "
+                f"Check the file isn't corrupted or open in another program."
+            ) from e
 
         # Handle duplicate root elements (take first block)
         xml_string = self._deduplicate_root(xml_string)
@@ -60,14 +66,18 @@ class XMLLoader:
                 force_list=self._force_list if self._force_list else None,
             )
         except Exception as e:
-            raise SourceError(f"Failed to parse XML: {e}") from e
+            raise SourceError(
+                f"Failed to parse XML at {path}: {e}. "
+                f"Verify the file is well-formed XML."
+            ) from e
 
         # Navigate to root path
         records = self._navigate_path(parsed, self._root)
 
         if records is None:
             raise SourceError(
-                f"Root path '{self._root}' not found in XML structure"
+                f"Root path '{self._root}' not found in {path}. "
+                f"Check the 'root' value in your config matches the XML structure."
             )
 
         # Ensure records is a list

@@ -147,7 +147,7 @@ def test_xlsx_sheet_by_index(loader, xlsx_file):
 def test_unsupported_format_raises_source_error(loader, tmp_path):
     f = tmp_path / "data.txt"
     f.write_text("hello\n")
-    with pytest.raises(SourceError, match="Unsupported file format"):
+    with pytest.raises(SourceError, match="Unsupported.*format"):
         loader.load(f)
 
 

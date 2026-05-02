@@ -18,7 +18,11 @@ from siphon.utils.errors import ConfigError
 _ENV_VAR_RE = re.compile(r"\$\{([^}]+)\}")
 
 
-def _substitute_env_vars(value: Any, variables: dict[str, Any] | None = None) -> Any:
+def _substitute_env_vars(
+    value: Any,
+    variables: dict[str, Any] | None = None,
+    source: str | Path | None = None,
+) -> Any:
     """Recursively substitute ${VAR_NAME} references in a parsed YAML structure.
 
     Resolution order:
@@ -36,18 +40,21 @@ def _substitute_env_vars(value: Any, variables: dict[str, Any] | None = None) ->
             # 2. Fall back to process environment.
             result = os.environ.get(var_name)
             if result is None:
+                location = f" in '{source}'" if source else ""
                 raise ConfigError(
-                    f"Environment variable '${{{var_name}}}' is not set"
+                    f"Environment variable '{var_name}' is referenced{location} but is not set. "
+                    f"Set it (e.g., export {var_name}=...) or add it to a .env file "
+                    f"in the same directory as the config."
                 )
             return result
 
         return _ENV_VAR_RE.sub(_replace, value)
 
     if isinstance(value, dict):
-        return {k: _substitute_env_vars(v, variables) for k, v in value.items()}
+        return {k: _substitute_env_vars(v, variables, source) for k, v in value.items()}
 
     if isinstance(value, list):
-        return [_substitute_env_vars(item, variables) for item in value]
+        return [_substitute_env_vars(item, variables, source) for item in value]
 
     return value
 
@@ -66,18 +73,21 @@ def _validate_field(field: Any, config: "SiphonConfig", context: str = "") -> No
         if field.values is None and field.preset is None:
             raise ConfigError(
                 f"{prefix} '{field.name}' has type 'enum' but is missing both "
-                "'values' and 'preset'; at least one is required."
+                "'values' and 'preset'. "
+                "Add either: values: [A, B, C] OR preset: us_states"
             )
     elif field.type == "regex":
         if field.pattern is None:
             raise ConfigError(
-                f"{prefix} '{field.name}' has type 'regex' but is missing 'pattern'."
+                f"{prefix} '{field.name}' has type 'regex' but is missing 'pattern'. "
+                "Add: pattern: '^...$'"
             )
     elif field.type == "subdivision":
         if field.country_code is None:
             raise ConfigError(
                 f"{prefix} '{field.name}' has type 'subdivision' but is missing "
-                "'country_code'."
+                "'country_code'. "
+                "Add: country_code: US (or appropriate ISO 3166-1 alpha-2 code)"
             )
 
     # Custom transforms require transforms.file to be configured.
@@ -88,7 +98,8 @@ def _validate_field(field: Any, config: "SiphonConfig", context: str = "") -> No
     ):
         raise ConfigError(
             f"{prefix} '{field.name}' uses transform type 'custom' but "
-            "'transforms.file' is not configured."
+            "'transforms.file' is not configured. "
+            "Add a transforms: file: path/to/transforms.py entry to your config."
         )
 
 
@@ -177,22 +188,29 @@ def load_config(path: str | Path) -> SiphonConfig:
     try:
         raw_text = config_path.read_text(encoding="utf-8")
     except OSError as exc:
-        raise ConfigError(f"Cannot read config file '{config_path}': {exc}") from exc
+        raise ConfigError(
+            f"Cannot read config file '{config_path}': {exc}. "
+            f"Check the path is correct and you have read permission."
+        ) from exc
 
     try:
         raw_data = yaml.safe_load(raw_text)
     except yaml.YAMLError as exc:
-        raise ConfigError(f"Invalid YAML in '{config_path}': {exc}") from exc
+        raise ConfigError(
+            f"Failed to parse YAML config at '{config_path}': {exc}\n"
+            f"Common causes: indentation errors, unquoted special characters, or missing colons."
+        ) from exc
 
     if not isinstance(raw_data, dict):
         raise ConfigError(
-            f"Config file '{config_path}' must contain a YAML mapping at the top level."
+            f"Config file '{config_path}' must contain a YAML mapping at the top level, "
+            f"but got {type(raw_data).__name__}. Check that your YAML file starts with key: value pairs."
         )
 
     # 3. Substitute ${VAR} references — config variables take priority over env vars.
     variables: dict[str, Any] | None = raw_data.get("variables")
     try:
-        data = _substitute_env_vars(raw_data, variables=variables)
+        data = _substitute_env_vars(raw_data, variables=variables, source=config_path)
     except ConfigError:
         raise
 
@@ -201,7 +219,7 @@ def load_config(path: str | Path) -> SiphonConfig:
         config = SiphonConfig.model_validate(data)
     except ValidationError as exc:
         raise ConfigError(
-            f"Config validation failed for '{config_path}': {exc}"
+            f"Invalid config at '{config_path}':\n{exc}"
         ) from exc
 
     # 5. Cross-validate field type requirements.

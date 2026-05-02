@@ -31,14 +31,20 @@ def load_custom_transforms(path: str | Path | None) -> dict[str, callable]:
 
     path = Path(path)
     if not path.exists():
-        raise ConfigError(f"Transform file not found: {path}")
+        raise ConfigError(
+            f"Transforms file not found: {path}. "
+            f"Check the 'transforms.file' path in your config."
+        )
 
     try:
         spec = importlib.util.spec_from_file_location("custom_transforms", path)
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
     except Exception as e:
-        raise ConfigError(f"Failed to load transform file {path}: {e}") from e
+        raise ConfigError(
+            f"Failed to import transforms file at {path}: {e}. "
+            f"Check the file is valid Python."
+        ) from e
 
     transforms = {}
     for name in dir(module):

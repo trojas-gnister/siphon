@@ -194,7 +194,7 @@ def test_empty_element_list_returns_empty_list(tmp_path):
 def test_missing_file_raises_source_error(tmp_path):
     """SourceError raised when the file does not exist."""
     loader = XMLLoader(root="Cases.Case")
-    with pytest.raises(SourceError, match="File not found"):
+    with pytest.raises(SourceError, match="file not found"):
         loader.load(tmp_path / "nonexistent.xml")
 
 

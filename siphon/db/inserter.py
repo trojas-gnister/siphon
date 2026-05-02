@@ -86,7 +86,10 @@ class Inserter:
         try:
             return _topo_sort(data_tables, edges)
         except ValueError as e:
-            raise DatabaseError(f"Circular dependency detected in table relationships: {e}") from e
+            raise DatabaseError(
+                f"Circular dependency in table relationships: {e}. "
+                f"Check your 'relationships:' config for a cycle (e.g., A -> B -> A)."
+            ) from e
 
     async def load_existing_keys(self):
         """Pre-populate lookup cache from existing DB rows for FK resolution."""
@@ -285,7 +288,9 @@ class Inserter:
             if audit_logger is not None:
                 audit_logger.clear()
             raise DatabaseError(
-                f"Insertion failed, transaction rolled back: {e}"
+                f"Insertion failed, this batch was rolled back: {e}\n"
+                f"Earlier successfully-committed batches are unaffected. "
+                f"Use --resume to continue from the last completed batch."
             ) from e
 
         # Flush audit entries for this successfully committed batch
