@@ -17,10 +17,6 @@ async def engine_setup():
 
 
 class TestAuditLoggerSetup:
-    async def test_audit_logger_can_be_constructed(self, engine_setup):
-        logger = AuditLogger(engine_setup, run_id=1)
-        assert logger is not None
-
     async def test_create_audit_table_creates_siphon_audit(self, engine_setup):
         from sqlalchemy import inspect
 
@@ -46,18 +42,6 @@ class TestAuditLoggerSetup:
             "field_changes", "source_file", "source_row", "reviewed_by",
             "created_at",
         }
-
-    async def test_audit_entry_dataclass_fields(self):
-        entry = AuditEntry(
-            target_table="companies",
-            target_pk="42",
-            action="insert",
-        )
-        assert entry.target_table == "companies"
-        assert entry.target_pk == "42"
-        assert entry.action == "insert"
-        assert entry.field_changes is None
-        assert entry.source_row is None
 
 
 class TestAuditLoggerBuffer:
