@@ -312,6 +312,75 @@ class Pipeline:
             await db_engine.dispose()
         logger.info("Dry run complete — no database operations performed")
 
+    async def _setup_run_tracking_and_audit(
+        self,
+        db_engine: DatabaseEngine,
+        valid_records: list[dict],
+        effective_input_path: str,
+        *,
+        resume: bool,
+        user: str | None,
+    ) -> tuple[
+        RunTracker | None,
+        int | None,
+        AuditLogger | None,
+        list[dict],
+    ]:
+        """Set up run tracking + audit logging for an upcoming insert.
+
+        If ``resume=True`` and a resumable failed run exists, slice
+        ``records_to_insert`` to skip already-processed records. Always calls
+        ``start_run`` (even on resume) to obtain a fresh ``run_id``.
+
+        Returns (run_tracker, run_id, audit_logger, records_to_insert).
+        """
+        run_tracker = None
+        run_id = None
+        records_to_insert = valid_records
+
+        if self._config.pipeline.track_runs:
+            run_tracker = RunTracker(db_engine)
+            await run_tracker.create_runs_table()
+
+            if resume:
+                resumable = await run_tracker.find_resumable_run(
+                    pipeline_name=self._config.name,
+                    source_file=effective_input_path,
+                    config_hash=self._config_hash(),
+                )
+                if resumable is not None:
+                    skip_n = resumable.processed_count
+                    logger.info(
+                        "Resuming from run id=%s — skipping first %d records",
+                        resumable.id, skip_n,
+                    )
+                    records_to_insert = valid_records[skip_n:]
+                else:
+                    logger.info("No resumable run found — running from start")
+
+            run_id = await run_tracker.start_run(
+                pipeline_name=self._config.name,
+                source_file=effective_input_path,
+                total_records=len(valid_records),
+                config_hash=self._config_hash(),
+            )
+
+        audit_logger = None
+        if (
+            self._config.pipeline.track_runs
+            and self._config.pipeline.audit
+            and run_id is not None
+        ):
+            audit_logger = AuditLogger(
+                db_engine,
+                run_id=run_id,
+                source_file=effective_input_path,
+                reviewed_by=user,
+            )
+            await audit_logger.create_audit_table()
+
+        return run_tracker, run_id, audit_logger, records_to_insert
+
     async def run(
         self,
         input_path: str | Path,
@@ -473,50 +542,15 @@ class Pipeline:
             # 11. Insert main records (target only top-level field tables)
             main_tables = {f.db.table for f in self._config.schema_.fields}
 
-            run_tracker = None
-            run_id = None
-            records_to_insert = valid_records
-
-            if self._config.pipeline.track_runs:
-                run_tracker = RunTracker(db_engine)
-                await run_tracker.create_runs_table()
-
-                if resume:
-                    resumable = await run_tracker.find_resumable_run(
-                        pipeline_name=self._config.name,
-                        source_file=effective_input_path,
-                        config_hash=self._config_hash(),
-                    )
-                    if resumable is not None:
-                        skip_n = resumable.processed_count
-                        logger.info(
-                            "Resuming from run id=%s — skipping first %d records",
-                            resumable.id, skip_n,
-                        )
-                        records_to_insert = valid_records[skip_n:]
-                    else:
-                        logger.info("No resumable run found — running from start")
-
-                run_id = await run_tracker.start_run(
-                    pipeline_name=self._config.name,
-                    source_file=effective_input_path,
-                    total_records=len(valid_records),
-                    config_hash=self._config_hash(),
-                )
-
-            audit_logger = None
-            if (
-                self._config.pipeline.track_runs
-                and self._config.pipeline.audit
-                and run_id is not None
-            ):
-                audit_logger = AuditLogger(
+            run_tracker, run_id, audit_logger, records_to_insert = (
+                await self._setup_run_tracking_and_audit(
                     db_engine,
-                    run_id=run_id,
-                    source_file=effective_input_path,
-                    reviewed_by=user,
+                    valid_records,
+                    effective_input_path,
+                    resume=resume,
+                    user=user,
                 )
-                await audit_logger.create_audit_table()
+            )
 
             async def _on_batch(committed: int) -> None:
                 if run_tracker is not None and run_id is not None:
