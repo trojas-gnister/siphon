@@ -20,10 +20,8 @@ def sample_config_dict():
     """Return a minimal valid SiphonConfig as a Python dict with SQLite URL."""
     return {
         "name": "test_pipeline",
-        "llm": {
-            "base_url": "https://api.openai.com/v1",
-            "model": "gpt-4o-mini",
-            "api_key": "sk-test-key",
+        "source": {
+            "type": "spreadsheet",
         },
         "database": {
             "url": "sqlite+aiosqlite:///test.db",
@@ -32,6 +30,7 @@ def sample_config_dict():
             "fields": [
                 {
                     "name": "company_name",
+                    "source": "Company Name",
                     "type": "string",
                     "required": True,
                     "db": {"table": "companies", "column": "name"},
@@ -44,7 +43,6 @@ def sample_config_dict():
             },
         },
         "pipeline": {
-            "chunk_size": 50,
             "review": False,
             "log_level": "info",
         },

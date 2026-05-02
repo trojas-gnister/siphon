@@ -46,11 +46,7 @@ def _make_config(dedup: dict | None = None, extra_fields: list[dict] | None = No
     return SiphonConfig.model_validate(
         {
             "name": "test",
-            "llm": {
-                "base_url": "https://api.example.com",
-                "model": "gpt-4o-mini",
-                "api_key": "sk-test",
-            },
+            "source": {"type": "spreadsheet"},
             "database": {"url": "sqlite+aiosqlite:///test.db"},
             "schema": schema,
         }
@@ -67,10 +63,8 @@ def sample_config_dict():
     """Minimal valid SiphonConfig as a dict (mirrors the shared conftest fixture)."""
     return {
         "name": "test_pipeline",
-        "llm": {
-            "base_url": "https://api.openai.com/v1",
-            "model": "gpt-4o-mini",
-            "api_key": "sk-test-key",
+        "source": {
+            "type": "spreadsheet",
         },
         "database": {
             "url": "sqlite+aiosqlite:///test.db",
@@ -97,7 +91,6 @@ def sample_config_dict():
             },
         },
         "pipeline": {
-            "chunk_size": 50,
             "review": False,
             "log_level": "info",
         },

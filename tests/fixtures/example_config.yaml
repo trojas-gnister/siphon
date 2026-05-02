@@ -1,9 +1,7 @@
 name: "example-companies"
 
-llm:
-  base_url: "http://localhost:11434/v1"
-  model: "llama3"
-  api_key: ""
+source:
+  type: spreadsheet
 
 database:
   url: "sqlite+aiosqlite://"
@@ -11,6 +9,8 @@ database:
 schema:
   fields:
     - name: company_name
+      source: "Company Name"
+      aliases: ["company_name"]
       type: string
       required: true
       min_length: 2
@@ -18,27 +18,37 @@ schema:
         table: companies
         column: name
     - name: parent_entity
+      source: "Parent Entity"
+      aliases: ["parent_entity"]
       type: string
       db:
         table: companies
         column: parent_name
     - name: phone
+      source: "Phone"
+      aliases: ["phone"]
       type: phone
       db:
         table: companies
         column: phone_number
     - name: website
+      source: "Website"
+      aliases: ["website"]
       type: url
       db:
         table: companies
         column: website_url
     - name: address
+      source: "Address"
+      aliases: ["address"]
       type: string
       min_length: 5
       db:
         table: addresses
         column: full_address
     - name: state
+      source: "State"
+      aliases: ["state"]
       type: enum
       preset: us_states
       db:
@@ -75,6 +85,5 @@ relationships:
       addresses: address_id
 
 pipeline:
-  chunk_size: 25
   review: false
   log_level: info

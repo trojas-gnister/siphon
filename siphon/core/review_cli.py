@@ -35,8 +35,7 @@ class ReviewCLI:
                 f"[bold]{summary['record_count']}[/bold] records across "
                 f"[bold]{len(summary['tables_affected'])}[/bold] tables: "
                 f"{', '.join(summary['tables_affected'])}\n"
-                f"Status: [bold]{summary['status']}[/bold] | "
-                f"Revisions: {summary['revision_count']}",
+                f"Status: [bold]{summary['status']}[/bold]",
                 title="Review Batch",
             )
         )
@@ -78,7 +77,6 @@ class ReviewCLI:
         Displays the batch and prompts for action:
         - ``"approve"`` or ``"a"``: approve the batch.
         - ``"reject"`` or ``"r"``: reject the batch.
-        - anything else: treated as a revision command sent to the LLM.
 
         Returns the final :class:`ReviewBatch` (approved or rejected).
         """
@@ -88,7 +86,7 @@ class ReviewCLI:
             self._console.print()
             self._console.print(
                 "[bold]Actions:[/bold] [green]approve[/green] (a) | "
-                "[red]reject[/red] (r) | or type a revision command"
+                "[red]reject[/red] (r)"
             )
 
             action = Prompt.ask("Review")
@@ -101,12 +99,6 @@ class ReviewCLI:
                 batch.reject()
                 self._console.print("[red]\u2717 Batch rejected[/red]")
             else:
-                # Treat as revision command
-                self._console.print(f"[yellow]Revising with: {action}[/yellow]")
-                try:
-                    batch = await batch.revise(action)
-                    self._console.print("[green]Revision complete[/green]")
-                except Exception as e:
-                    self._console.print(f"[red]Revision failed: {e}[/red]")
+                self._console.print("[yellow]Unknown action. Type 'approve' or 'reject'.[/yellow]")
 
         return batch

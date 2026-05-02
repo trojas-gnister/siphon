@@ -14,18 +14,11 @@ from siphon.utils.errors import DatabaseError
 # Helpers
 # ---------------------------------------------------------------------------
 
-_LLM_BLOCK = {
-    "base_url": "https://api.example.com/v1",
-    "model": "gpt-4o-mini",
-    "api_key": "sk-test",
-}
-
-
 def _simple_config() -> SiphonConfig:
     """Single-table config with auto_increment PK."""
     return SiphonConfig.model_validate({
         "name": "test_pipeline",
-        "llm": _LLM_BLOCK,
+        "source": {"type": "spreadsheet"},
         "database": {"url": "sqlite+aiosqlite://"},
         "schema": {
             "fields": [
@@ -50,7 +43,7 @@ def _uuid_config() -> SiphonConfig:
     """Single-table config with UUID PK."""
     return SiphonConfig.model_validate({
         "name": "test_pipeline",
-        "llm": _LLM_BLOCK,
+        "source": {"type": "spreadsheet"},
         "database": {"url": "sqlite+aiosqlite://"},
         "schema": {
             "fields": [
@@ -75,7 +68,7 @@ def _belongs_to_config() -> SiphonConfig:
     """Two-table config with belongs_to relationship (contacts -> companies)."""
     return SiphonConfig.model_validate({
         "name": "test_pipeline",
-        "llm": _LLM_BLOCK,
+        "source": {"type": "spreadsheet"},
         "database": {"url": "sqlite+aiosqlite://"},
         "schema": {
             "fields": [
@@ -118,7 +111,7 @@ def _self_ref_config() -> SiphonConfig:
     """Single-table config with self-referential belongs_to (parent company)."""
     return SiphonConfig.model_validate({
         "name": "test_pipeline",
-        "llm": _LLM_BLOCK,
+        "source": {"type": "spreadsheet"},
         "database": {"url": "sqlite+aiosqlite://"},
         "schema": {
             "fields": [
@@ -157,7 +150,7 @@ def _junction_config() -> SiphonConfig:
     """Two-table config with a junction table."""
     return SiphonConfig.model_validate({
         "name": "test_pipeline",
-        "llm": _LLM_BLOCK,
+        "source": {"type": "spreadsheet"},
         "database": {"url": "sqlite+aiosqlite://"},
         "schema": {
             "fields": [
@@ -570,7 +563,7 @@ class TestTopologicalSort:
         """A -> B -> C dependency chain is sorted correctly."""
         config = SiphonConfig.model_validate({
             "name": "test_pipeline",
-            "llm": _LLM_BLOCK,
+            "source": {"type": "spreadsheet"},
             "database": {"url": "sqlite+aiosqlite://"},
             "schema": {
                 "fields": [

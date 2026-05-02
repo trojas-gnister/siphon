@@ -16,8 +16,17 @@ class ConfigError(SiphonError):
     """Raised for invalid YAML, missing required fields, or unknown types."""
 
 
-class ExtractionError(SiphonError):
-    """Raised when an LLM call fails, returns an unparseable response, or produces a row count mismatch."""
+class SourceError(SiphonError):
+    """Source loading failed — file not found, parse error, unsupported format."""
+    pass
+
+
+class TransformError(SiphonError):
+    """Transform function failed."""
+    pass
+
+
+ExtractionError = SourceError  # Deprecated: use SourceError
 
 
 class ValidationError(SiphonError):

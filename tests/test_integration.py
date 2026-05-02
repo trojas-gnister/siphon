@@ -1,6 +1,6 @@
 """End-to-end integration tests replicating the example use case.
 
-Verifies the full pipeline: extract -> validate -> dedup -> insert,
+Verifies the full pipeline: load -> map -> validate -> dedup -> insert,
 including multi-table insertion, parent FK resolution, junction rows,
 and deduplication, all against a real (file-based) SQLite database.
 """
@@ -8,7 +8,6 @@ and deduplication, all against a real (file-based) SQLite database.
 from __future__ import annotations
 
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from sqlalchemy import text
@@ -19,21 +18,6 @@ from siphon.core.pipeline import Pipeline
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
 
-# Mock LLM response: what the LLM would extract from the CSV.
-# This is the "normalised" output that an LLM would produce from the raw CSV.
-MOCK_LLM_RESPONSE = [
-    {"company_name": "Acme Corp", "parent_entity": "", "phone": "5551234567", "website": "https://acme.com", "address": "123 Main St", "state": "CA"},
-    {"company_name": "Acme West", "parent_entity": "Acme Corp", "phone": "5559876543", "website": "https://acmewest.com", "address": "456 Oak Ave", "state": "CA"},
-    {"company_name": "Acme East", "parent_entity": "Acme Corp", "phone": "5551112222", "website": "https://acmeeast.com", "address": "789 Pine Rd", "state": "NY"},
-    {"company_name": "Beta Inc", "parent_entity": "", "phone": "5553334444", "website": "https://beta.io", "address": "321 Elm St", "state": "TX"},
-    {"company_name": "Beta South", "parent_entity": "Beta Inc", "phone": "5554445555", "website": "https://betasouth.com", "address": "654 Maple Dr", "state": "FL"},
-    {"company_name": "Gamma LLC", "parent_entity": "", "phone": "5556667777", "website": "https://gamma.org", "address": "987 Cedar Ln", "state": "WA"},
-    {"company_name": "Delta Corp", "parent_entity": "", "phone": "5557778888", "website": "https://delta.com", "address": "111 Birch St", "state": "OR"},
-    {"company_name": "Acme Corp", "parent_entity": "", "phone": "5551234567", "website": "https://acme.com", "address": "123 Main St", "state": "CA"},
-    {"company_name": "Epsilon", "parent_entity": "", "phone": "5559990000", "website": "https://epsilon.net", "address": "222 Spruce Ave", "state": "IL"},
-    {"company_name": "Acme Central", "parent_entity": "Acme Corp", "phone": "5551234000", "website": "https://acmecentral.com", "address": "333 Walnut Blvd", "state": "OH"},
-]
-
 
 def _load_config_with_db(tmp_path: Path):
     """Load the example config and override DB URL to a file-based SQLite in tmp_path."""
@@ -43,26 +27,18 @@ def _load_config_with_db(tmp_path: Path):
     return config
 
 
-async def _run_pipeline(config, mock_response=None):
-    """Run the pipeline with a mocked LLM client.
+async def _run_pipeline(config, dry_run: bool = False):
+    """Run the v2 pipeline against the sample companies CSV.
 
     Returns the PipelineResult.
     """
-    if mock_response is None:
-        mock_response = MOCK_LLM_RESPONSE
-
-    with patch("siphon.core.pipeline.LLMClient") as MockLLMClient:
-        mock_instance = MagicMock()
-        mock_instance.extract_json = AsyncMock(return_value=mock_response)
-        MockLLMClient.return_value = mock_instance
-
-        pipeline = Pipeline(config)
-        result = await pipeline.run(
-            FIXTURES_DIR / "sample_companies.csv",
-            create_tables=True,
-            no_review=True,
-        )
-
+    pipeline = Pipeline(config)
+    result = await pipeline.run(
+        FIXTURES_DIR / "sample_companies.csv",
+        create_tables=True,
+        no_review=True,
+        dry_run=dry_run,
+    )
     return result
 
 
@@ -83,7 +59,7 @@ async def _query_db(db_url: str, sql: str) -> list:
 
 
 class TestFullPipeline:
-    """Full pipeline: extract, validate, dedup, insert, verify DB state."""
+    """Full pipeline: load, map, validate, dedup, insert, verify DB state."""
 
     async def test_pipeline_result_counts(self, tmp_path: Path):
         """Pipeline returns correct counts for extracted, duplicates, inserted."""
@@ -254,17 +230,7 @@ class TestDryRun:
         """Dry run returns counts but total_inserted is 0."""
         config = _load_config_with_db(tmp_path)
 
-        with patch("siphon.core.pipeline.LLMClient") as MockLLMClient:
-            mock_instance = MagicMock()
-            mock_instance.extract_json = AsyncMock(return_value=MOCK_LLM_RESPONSE)
-            MockLLMClient.return_value = mock_instance
-
-            pipeline = Pipeline(config)
-            result = await pipeline.run(
-                FIXTURES_DIR / "sample_companies.csv",
-                dry_run=True,
-                no_review=True,
-            )
+        result = await _run_pipeline(config, dry_run=True)
 
         assert result.dry_run is True
         assert result.total_extracted == 10

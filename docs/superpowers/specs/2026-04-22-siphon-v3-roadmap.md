@@ -18,12 +18,19 @@ The roadmap targets open-source adoption. Each feature solves a real friction po
 | 2 | Dry-run with diff | Phase 1 (lookup-by-key logic) | Audit trail diff format |
 | 3 | Incremental/resumable runs | Phase 1 (handle "already exists") | Audit trail run_id |
 | 4 | Audit trail | Phases 1-3 | Web UI audit page |
-| 5 | Pre/post hooks | — (independent) | — |
 | 6 | Multi-source joins | — (independent) | — |
-| 7 | Scheduled/watched imports | Phases 1-4 (reliability) | Service deployment |
-| 8 | Web UI | Phases 1-7 (API surface) | Non-technical adoption |
+| 8 | Web UI | Phases 1-4, 6 (API surface) | Non-technical adoption |
 
-Phases 1-4 build linearly. Phases 5-7 are independent and can be reordered. Phase 8 is the capstone.
+Phases 1-4 build linearly. Phase 6 is independent. Phase 8 is the capstone.
+
+## Cut from Original Plan
+
+**Phase 5 (Pre/post hooks)** and **Phase 7 (Scheduled/watched imports)** were removed after review.
+
+- **Pre/post hooks**: Shell already does this. `mysql -e "SET FOREIGN_KEY_CHECKS=0" && siphon run data.csv && curl slack-webhook` is more flexible than reinventing a hook DSL in YAML.
+- **Scheduled/watched imports**: Wrong layer. systemd, cron, Airflow, Kubernetes CronJobs, and GitHub Actions all do scheduling better than Siphon could. Siphon should be a great `siphon run` command that those tools invoke. Adding a `siphon watch` daemon mode duplicates work and doesn't compose with container orchestration.
+
+Both decisions reduce surface area in favor of UNIX composition. Phase numbers 5 and 7 are kept in the table for historical reference.
 
 ---
 
@@ -193,46 +200,17 @@ _siphon_audit:
 
 ---
 
-## Phase 5: Pre/Post Hooks
+## Phase 5: Pre/Post Hooks — CUT
 
-### Problem
+This phase was removed in favor of UNIX shell composition. Users can already do:
 
-Users manually run shell commands and SQL around `siphon run` (disable triggers, refresh views, send Slack notifications). Should be declarative.
-
-### Design
-
-```yaml
-pipeline:
-  hooks:
-    pre:
-      - type: sql
-        run: "SET FOREIGN_KEY_CHECKS = 0"
-      - type: shell
-        run: "echo 'Starting at $(date)' >> /var/log/imports.log"
-    post:
-      - type: sql
-        run: "REFRESH MATERIALIZED VIEW company_stats"
-      - type: shell
-        run: "curl -X POST $SLACK_WEBHOOK -d '{\"text\": \"Done\"}'"
-    on_error:
-      - type: shell
-        run: "curl -X POST $SLACK_WEBHOOK -d '{\"text\": \"Failed\"}'"
+```bash
+mysql -e "SET FOREIGN_KEY_CHECKS = 0"
+siphon run data.csv && curl $SLACK_WEBHOOK || curl $SLACK_FAILURE_WEBHOOK
+mysql -e "REFRESH MATERIALIZED VIEW company_stats"
 ```
 
-**Three hook points:**
-- `pre` — runs before any records processed (after config validation, DB connection verified)
-- `post` — runs only after successful completion
-- `on_error` — runs when pipeline fails
-
-**Two hook types:**
-- `sql` — executed against the target DB connection
-- `shell` — subprocess with environment variables: `$SIPHON_PIPELINE_NAME`, `$SIPHON_TOTAL_INSERTED`, `$SIPHON_RUN_ID`, etc.
-
-**Failure semantics:**
-- `pre` hook failure: aborts pipeline
-- `post`/`on_error` hook failure: warning logged, pipeline status unchanged (data already committed)
-
-Hooks run sequentially in declared order.
+Inventing a YAML hook DSL would duplicate what bash already does well, with less flexibility. See "Cut from Original Plan" at the top of this document.
 
 ---
 
@@ -292,47 +270,17 @@ This is the most architecturally complex phase. Introduces join logic, key match
 
 ---
 
-## Phase 7: Scheduled/Watched Imports
+## Phase 7: Scheduled/Watched Imports — CUT
 
-### Problem
+This phase was removed because scheduling and file-watching belong to the OS / orchestration layer, not the ETL tool. Users have:
 
-Manual `siphon run` for every new file. Users want automatic processing of new files in a directory.
+- **systemd timers** or **cron** — schedule `siphon run` on Linux
+- **Kubernetes CronJobs** — same in containers
+- **GitHub Actions / GitLab CI** — schedule from CI
+- **Airflow / Prefect / Dagster** — full orchestration with dependencies
+- **inotify / fswatch** + a one-line shell wrapper — directory watching
 
-### Design
-
-New command:
-
-```bash
-siphon watch ./incoming/ --config siphon.yaml --create-tables
-```
-
-**Behavior:**
-- Polls a directory for new files matching supported extensions
-- On new file: runs the full pipeline against it
-- On success: moves file to `./incoming/_processed/`
-- On failure: moves file to `./incoming/_failed/`
-- Each run logged via `_siphon_runs` (Phase 3)
-
-**Config:**
-
-```yaml
-pipeline:
-  watch:
-    poll_interval: 10          # seconds between scans
-    processed_dir: _processed
-    failed_dir: _failed
-    settle_time: 2             # seconds to wait after file stops changing
-```
-
-**Implementation:** Polling via `pathlib` + `asyncio.sleep`. No external deps (no watchdog, no inotify). Less efficient but works everywhere — Linux, Mac, Docker, network mounts.
-
-### Out of Scope
-
-- S3/cloud bucket watching (community can request)
-- Cron scheduling (use system cron + `siphon run`)
-- Daemonization (use systemd/supervisor/Docker)
-
-Philosophy: Siphon handles "what to do with files." OS handles "when to run" and "keep alive."
+Building `siphon watch` into the CLI duplicates these tools and doesn't compose well with container orchestration. Siphon should be a great `siphon run` command that other tools invoke. See "Cut from Original Plan" at the top of this document.
 
 ---
 

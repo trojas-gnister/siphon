@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
 
 import pandas as pd
 import pytest
@@ -16,23 +15,18 @@ from siphon.core.pipeline import Pipeline, PipelineResult
 # Helpers
 # ---------------------------------------------------------------------------
 
-_LLM_BLOCK = {
-    "base_url": "https://api.example.com/v1",
-    "model": "gpt-4o-mini",
-    "api_key": "sk-test",
-}
-
 
 def _simple_config() -> SiphonConfig:
     """Single-table config for use in tests."""
     return SiphonConfig.model_validate({
         "name": "test_pipeline",
-        "llm": _LLM_BLOCK,
+        "source": {"type": "spreadsheet"},
         "database": {"url": "sqlite+aiosqlite://"},
         "schema": {
             "fields": [
                 {
                     "name": "company_name",
+                    "source": "company_name",
                     "type": "string",
                     "required": True,
                     "db": {"table": "companies", "column": "name"},
@@ -45,7 +39,6 @@ def _simple_config() -> SiphonConfig:
             },
         },
         "pipeline": {
-            "chunk_size": 50,
             "review": False,
             "log_level": "warning",
         },
@@ -126,19 +119,9 @@ class TestDirectoryInput:
         _write_csv(tmp_path, [{"company_name": "Acme"}], "file1.csv")
         _write_csv(tmp_path, [{"company_name": "Beta"}], "file2.csv")
 
-        records_file1 = [{"company_name": "Acme"}]
-        records_file2 = [{"company_name": "Beta"}]
-
         config = _simple_config()
-        with patch("siphon.core.pipeline.LLMClient") as MockLLM:
-            mock_llm = MagicMock()
-            mock_llm.extract_json = AsyncMock(
-                side_effect=[records_file1, records_file2]
-            )
-            MockLLM.return_value = mock_llm
-
-            pipeline = Pipeline(config)
-            result = await pipeline.run(tmp_path, dry_run=True)
+        pipeline = Pipeline(config)
+        result = await pipeline.run(tmp_path, dry_run=True)
 
         assert result.total_extracted == 2
 
@@ -155,16 +138,9 @@ class TestDirectoryInput:
         (tmp_path / "notes.txt").write_text("ignore")
         (tmp_path / "meta.json").write_text("{}")
 
-        extracted = [{"company_name": "Acme"}]
-
         config = _simple_config()
-        with patch("siphon.core.pipeline.LLMClient") as MockLLM:
-            mock_llm = MagicMock()
-            mock_llm.extract_json = AsyncMock(return_value=extracted)
-            MockLLM.return_value = mock_llm
-
-            pipeline = Pipeline(config)
-            result = await pipeline.run(tmp_path, dry_run=True)
+        pipeline = Pipeline(config)
+        result = await pipeline.run(tmp_path, dry_run=True)
 
         assert result.total_extracted == 1
 
@@ -175,6 +151,7 @@ class TestDirectoryInput:
         config = _simple_config()
         pipeline = Pipeline(config)
 
+        from unittest.mock import patch
         with patch("siphon.core.pipeline.logger") as mock_logger:
             result = await pipeline.run(tmp_path, dry_run=True)
 
@@ -191,19 +168,9 @@ class TestDirectoryInput:
         _write_csv(tmp_path, [{"company_name": "A"}, {"company_name": "B"}], "f1.csv")
         _write_csv(tmp_path, [{"company_name": "C"}], "f2.csv")
 
-        records_f1 = [{"company_name": "A"}, {"company_name": "B"}]
-        records_f2 = [{"company_name": "C"}]
-
         config = _simple_config()
-        with patch("siphon.core.pipeline.LLMClient") as MockLLM:
-            mock_llm = MagicMock()
-            mock_llm.extract_json = AsyncMock(
-                side_effect=[records_f1, records_f2]
-            )
-            MockLLM.return_value = mock_llm
-
-            pipeline = Pipeline(config)
-            result = await pipeline.run(tmp_path, dry_run=True)
+        pipeline = Pipeline(config)
+        result = await pipeline.run(tmp_path, dry_run=True)
 
         assert result.total_extracted == 3
         assert result.total_valid == 3
@@ -216,20 +183,9 @@ class TestDirectoryInput:
         xlsx_path = tmp_path / "data.xlsx"
         pd.DataFrame([{"company_name": "XlsxCo"}]).to_excel(xlsx_path, index=False)
 
-        records_csv = [{"company_name": "CsvCo"}]
-        records_xlsx = [{"company_name": "XlsxCo"}]
-
         config = _simple_config()
-        with patch("siphon.core.pipeline.LLMClient") as MockLLM:
-            mock_llm = MagicMock()
-            # sorted order: data.csv < data.xlsx alphabetically
-            mock_llm.extract_json = AsyncMock(
-                side_effect=[records_csv, records_xlsx]
-            )
-            MockLLM.return_value = mock_llm
-
-            pipeline = Pipeline(config)
-            result = await pipeline.run(tmp_path, dry_run=True)
+        pipeline = Pipeline(config)
+        result = await pipeline.run(tmp_path, dry_run=True)
 
         assert result.total_extracted == 2
 
@@ -238,15 +194,9 @@ class TestDirectoryInput:
         csv_path = _write_csv(
             tmp_path, [{"company_name": "Solo"}], "solo.csv"
         )
-        extracted = [{"company_name": "Solo"}]
 
         config = _simple_config()
-        with patch("siphon.core.pipeline.LLMClient") as MockLLM:
-            mock_llm = MagicMock()
-            mock_llm.extract_json = AsyncMock(return_value=extracted)
-            MockLLM.return_value = mock_llm
-
-            pipeline = Pipeline(config)
-            result = await pipeline.run(csv_path, dry_run=True)
+        pipeline = Pipeline(config)
+        result = await pipeline.run(csv_path, dry_run=True)
 
         assert result.total_extracted == 1

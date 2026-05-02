@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import uuid
 
-from sqlalchemy import Column, ForeignKey, Integer, String
+from sqlalchemy import Column, ForeignKey, Integer, String, UniqueConstraint
 from sqlalchemy.orm import DeclarativeBase
 
 from siphon.config.schema import (
@@ -61,11 +61,22 @@ class ModelGenerator:
         belongs_to relationships, and creates the ORM class with all
         columns in a single pass.
         """
-        # Group fields by table
+        # Group fields by table (include both top-level and collection fields)
         table_fields: dict[str, list] = {}
         for field in self._config.schema_.fields:
             table_name = field.db.table
             table_fields.setdefault(table_name, []).append(field)
+
+        # Include collection fields so their target tables get proper columns
+        if self._config.schema_.collections:
+            for collection in self._config.schema_.collections:
+                for field in collection.fields:
+                    table_name = field.db.table
+                    # Avoid duplicate columns (a field name may appear in both
+                    # top-level and collection targeting the same table/column)
+                    existing = table_fields.get(table_name, [])
+                    if not any(f.db.column == field.db.column for f in existing):
+                        table_fields.setdefault(table_name, []).append(field)
 
         # Collect FK columns per table from belongs_to relationships
         table_fks: dict[str, dict[str, Column]] = {}
@@ -109,6 +120,31 @@ class ModelGenerator:
             # FK columns from belongs_to relationships
             for fk_col_name, fk_col in table_fks.get(table_name, {}).items():
                 columns[fk_col_name] = fk_col
+
+            # Add a UniqueConstraint for on_conflict.key so that SQLite/Postgres
+            # can match the ON CONFLICT clause. Field names in on_conflict.key
+            # are mapped to their underlying DB column names here.
+            if table_config.on_conflict is not None:
+                field_to_column = {
+                    f.name: f.db.column for f in self._config.schema_.fields
+                }
+                if self._config.schema_.collections:
+                    for coll in self._config.schema_.collections:
+                        for f in coll.fields:
+                            field_to_column.setdefault(f.name, f.db.column)
+                conflict_columns = [
+                    field_to_column.get(name, name)
+                    for name in table_config.on_conflict.key
+                ]
+                # Skip the constraint when the conflict key is the primary key
+                # (already unique by definition).
+                if conflict_columns != [pk.column]:
+                    columns["__table_args__"] = (
+                        UniqueConstraint(
+                            *conflict_columns,
+                            name=f"uq_{table_name}_{'_'.join(conflict_columns)}",
+                        ),
+                    )
 
             # Create ORM class dynamically
             class_name = table_name.title().replace("_", "")

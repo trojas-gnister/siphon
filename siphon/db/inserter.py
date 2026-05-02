@@ -1,5 +1,6 @@
 """Relationship-aware record inserter with topological sort for the Siphon ETL pipeline."""
 
+import asyncio
 import logging
 import uuid
 from collections import defaultdict
@@ -7,8 +8,10 @@ from collections import defaultdict
 from sqlalchemy import select
 
 from siphon.config.schema import BelongsToRelationship, JunctionRelationship, SiphonConfig
+from siphon.db.audit import AuditEntry, AuditLogger
 from siphon.db.engine import DatabaseEngine
 from siphon.db.models import ModelGenerator
+from siphon.db.upsert import detect_dialect
 from siphon.utils.errors import DatabaseError
 
 logger = logging.getLogger("siphon")
@@ -23,7 +26,8 @@ class Inserter:
     - FK resolution via a lookup cache
     - Junction row insertion
     - UUID PK generation
-    - Single transaction with full rollback on failure
+    - One transaction per batch (configurable via ``batch_size``); failing
+      batch rolls back, previously committed batches persist.
     """
 
     def __init__(
@@ -36,45 +40,56 @@ class Inserter:
         self._db = db_engine
         self._models = model_generator.models
         self._generator = model_generator
+        self._dialect = detect_dialect(config.database.url)
 
         # Lookup cache: {table_name: {resolve_by_value: pk_value}}
         self._lookup_cache: dict[str, dict[str, any]] = defaultdict(dict)
 
-    def topological_sort(self) -> list[str]:
-        """Sort table names so parents come before children (Kahn's algorithm).
+        # Build the field-name → DB column-name map (used by upsert executor)
+        name_to_column: dict[str, str] = {}
+        for f in self._config.schema_.fields or []:
+            if f.db:
+                name_to_column[f.name] = f.db.column
+        if self._config.schema_.collections:
+            for coll in self._config.schema_.collections:
+                for f in coll.fields:
+                    if f.db:
+                        name_to_column[f.name] = f.db.column
 
-        Only considers data tables (not junction tables).
-        Tables with no dependencies come first.
-        Raises DatabaseError if a circular dependency is detected.
+        from siphon.db.upsert_executor import UpsertExecutor
+        self._upsert_executor = UpsertExecutor(
+            dialect=self._dialect,
+            field_name_to_column=name_to_column,
+        )
+
+    def topological_sort(self) -> list[str]:
+        """Sort table names so parents come before children.
+
+        Only considers data tables (not junction tables). Self-referential
+        relationships are excluded from the graph (handled separately by
+        record-level sorting).
+
+        Raises:
+            DatabaseError: If a circular dependency is detected.
         """
+        from siphon.utils.graph import topological_sort as _topo_sort
+
         data_tables = list(self._config.schema_.tables.keys())
-        in_degree = {t: 0 for t in data_tables}
-        graph = defaultdict(list)  # parent -> [children]
+        edges: list[tuple[str, str]] = []
 
         for rel in self._config.relationships:
             if isinstance(rel, BelongsToRelationship):
-                child = rel.table
-                parent = rel.references
-                if child != parent:  # skip self-referential for graph purposes
-                    graph[parent].append(child)
-                    in_degree[child] += 1
+                # Skip self-referential — handled at record level
+                if rel.table != rel.references:
+                    edges.append((rel.references, rel.table))
 
-        # Kahn's algorithm
-        queue = [t for t in data_tables if in_degree[t] == 0]
-        result = []
-
-        while queue:
-            node = queue.pop(0)
-            result.append(node)
-            for neighbor in graph[node]:
-                in_degree[neighbor] -= 1
-                if in_degree[neighbor] == 0:
-                    queue.append(neighbor)
-
-        if len(result) != len(data_tables):
-            raise DatabaseError("Circular dependency detected in table relationships")
-
-        return result
+        try:
+            return _topo_sort(data_tables, edges)
+        except ValueError as e:
+            raise DatabaseError(
+                f"Circular dependency in table relationships: {e}. "
+                f"Check your 'relationships:' config for a cycle (e.g., A -> B -> A)."
+            ) from e
 
     async def load_existing_keys(self):
         """Pre-populate lookup cache from existing DB rows for FK resolution."""
@@ -138,13 +153,34 @@ class Inserter:
 
         return sorted_records
 
-    async def insert(self, records: list[dict]) -> int:
-        """Insert all records in a single transaction.
+    async def insert(
+        self,
+        records: list[dict],
+        *,
+        target_tables: set[str] | None = None,
+        batch_size: int | None = None,
+        on_batch=None,
+        audit_logger: "AuditLogger | None" = None,
+    ) -> int:
+        """Insert records, optionally in batches with a per-batch progress callback.
 
-        Returns number of records inserted.
-        Raises DatabaseError on failure (entire batch rolled back).
+        Args:
+            records: List of mapped record dicts.
+            target_tables: If provided, only insert into these tables.
+                          Used for collection records that should only go
+                          into their specific child table(s).
+            batch_size: If set, commit every N records in a separate transaction.
+                        If None, all records committed in one transaction (v2 behavior).
+            on_batch: Optional callable invoked after each successful batch commit
+                      with the cumulative committed count. Sync or async — both supported.
+
+        Returns total number of records inserted across all batches.
+        Raises DatabaseError on failure (the failing batch is rolled back; previously
+        committed batches are NOT rolled back).
         """
         table_order = self.topological_sort()
+        if target_tables is not None:
+            table_order = [t for t in table_order if t in target_tables]
 
         # Sort records for self-referential relationships
         for rel in self._config.relationships:
@@ -152,10 +188,7 @@ class Inserter:
                 records = self._sort_records_for_self_ref(records, rel)
                 break
 
-        # Group fields by table for quick lookup
-        table_fields: dict[str, list] = defaultdict(list)
-        for field in self._config.schema_.fields:
-            table_fields[field.db.table].append(field)
+        table_fields = self._build_table_fields_map()
 
         # Find junction relationships
         junctions = [
@@ -165,88 +198,223 @@ class Inserter:
             r for r in self._config.relationships if isinstance(r, BelongsToRelationship)
         ]
 
+        # Empty input: return immediately without invoking the callback.
+        if not records:
+            logger.info("Inserted 0 records")
+            return 0
+
+        # Determine batch size — None or invalid means "all at once"
+        if batch_size and batch_size > 0:
+            effective_batch = batch_size
+        else:
+            effective_batch = len(records)
+
         inserted_count = 0
+        for batch_start in range(0, len(records), effective_batch):
+            batch = records[batch_start : batch_start + effective_batch]
+            await self._insert_batch(
+                batch,
+                table_order=table_order,
+                table_fields=table_fields,
+                junctions=junctions,
+                belongs_tos=belongs_tos,
+                audit_logger=audit_logger,
+            )
 
-        async with self._db.session() as session:
-            try:
-                async with session.begin():
-                    for record in records:
-                        # Track inserted IDs for this record per table
-                        record_ids: dict[str, any] = {}
-
-                        for table_name in table_order:
-                            model = self._models[table_name]
-                            pk_config = self._config.schema_.tables[table_name].primary_key
-
-                            # Build row data from record fields mapped to this table
-                            row_data = {}
-                            for field in table_fields.get(table_name, []):
-                                value = record.get(field.name)
-                                if value is not None:
-                                    row_data[field.db.column] = value
-
-                            # Generate UUID if needed
-                            if pk_config.type == "uuid":
-                                row_data[pk_config.column] = str(uuid.uuid4())
-
-                            # Resolve belongs_to FK values
-                            for rel in belongs_tos:
-                                if rel.table == table_name:
-                                    ref_value = record.get(rel.field)
-                                    if ref_value:
-                                        fk_value = self._lookup_cache.get(
-                                            rel.references, {}
-                                        ).get(ref_value)
-                                        if fk_value is not None:
-                                            row_data[rel.fk_column] = fk_value
-
-                            # Skip if no data columns for an auto_increment table
-                            if not row_data and pk_config.type == "auto_increment":
-                                continue
-
-                            # Insert
-                            instance = model(**row_data)
-                            session.add(instance)
-                            await session.flush()
-
-                            # Capture the PK
-                            pk_value = getattr(instance, pk_config.column)
-                            record_ids[table_name] = pk_value
-
-                            # Update lookup cache for belongs_to resolution
-                            for rel in belongs_tos:
-                                if rel.references == table_name:
-                                    resolve_col = rel.resolve_by
-                                    resolve_val = row_data.get(resolve_col)
-                                    if resolve_val:
-                                        self._lookup_cache[table_name][resolve_val] = pk_value
-
-                        # Insert junction rows
-                        for junc in junctions:
-                            t1, t2 = junc.link
-                            if t1 in record_ids and t2 in record_ids:
-                                junc_model = self._models[junc.through]
-                                junc_row = junc_model(
-                                    **{
-                                        junc.columns[t1]: record_ids[t1],
-                                        junc.columns[t2]: record_ids[t2],
-                                    }
-                                )
-                                session.add(junc_row)
-
-                        inserted_count += 1
-
-                    # Transaction commits at end of `async with session.begin()`
-
-            except DatabaseError:
-                raise
-            except Exception as e:
-                raise DatabaseError(
-                    f"Insertion failed, transaction rolled back: {e}"
-                ) from e
+            inserted_count += len(batch)
+            if on_batch is not None:
+                res = on_batch(inserted_count)
+                if asyncio.iscoroutine(res):
+                    await res
 
         logger.info(f"Inserted {inserted_count} records")
         return inserted_count
+
+    def _build_table_fields_map(self) -> dict[str, list]:
+        """Map each target table name to its list of FieldConfigs.
+
+        Starts with top-level fields, then layers in collection fields
+        (deduped by column name). Collection fields provide the column
+        mappings for child tables.
+        """
+        table_fields: dict[str, list] = defaultdict(list)
+        for field in self._config.schema_.fields:
+            table_fields[field.db.table].append(field)
+
+        if self._config.schema_.collections:
+            for collection in self._config.schema_.collections:
+                for field in collection.fields:
+                    existing = table_fields[field.db.table]
+                    if not any(f.db.column == field.db.column for f in existing):
+                        table_fields[field.db.table].append(field)
+
+        return table_fields
+
+    async def _insert_batch(
+        self,
+        batch: list[dict],
+        *,
+        table_order: list[str],
+        table_fields: dict,
+        junctions: list,
+        belongs_tos: list,
+        audit_logger: "AuditLogger | None" = None,
+    ) -> None:
+        """Insert a single batch of records inside one transaction.
+
+        Audit entries collected during the batch are flushed if the transaction
+        commits successfully; cleared if it fails. DatabaseError is re-raised
+        as-is; other exceptions are wrapped in DatabaseError.
+        """
+        try:
+            async with self._db.session() as session:
+                async with session.begin():
+                    for record in batch:
+                        await self._insert_one_record(
+                            session,
+                            record,
+                            table_order,
+                            table_fields,
+                            junctions,
+                            belongs_tos,
+                            audit_logger=audit_logger,
+                        )
+                    # Transaction commits at end of `async with session.begin()`
+        except DatabaseError:
+            if audit_logger is not None:
+                audit_logger.clear()
+            raise
+        except Exception as e:
+            if audit_logger is not None:
+                audit_logger.clear()
+            raise DatabaseError(
+                f"Insertion failed, this batch was rolled back: {e}\n"
+                f"Earlier successfully-committed batches are unaffected. "
+                f"Use --resume to continue from the last completed batch."
+            ) from e
+
+        # Flush audit entries for this successfully committed batch
+        if audit_logger is not None:
+            await audit_logger.flush()
+
+    def _build_row_data_for_table(
+        self,
+        record: dict,
+        table_name: str,
+        pk_config,
+        table_fields: dict,
+        belongs_tos: list,
+    ) -> dict:
+        """Build the row dict for a single table from a single mapped record.
+
+        Includes:
+        - Field values mapped to this table (via field.db.column)
+        - A generated UUID if the PK type is uuid
+        - Resolved FK values for belongs_to relationships pointing to this table
+        """
+        # Build row data from record fields mapped to this table
+        row_data: dict = {}
+        for field in table_fields.get(table_name, []):
+            value = record.get(field.name)
+            if value is not None:
+                row_data[field.db.column] = value
+
+        # Generate UUID if needed
+        if pk_config.type == "uuid":
+            row_data[pk_config.column] = str(uuid.uuid4())
+
+        # Resolve belongs_to FK values
+        for rel in belongs_tos:
+            if rel.table == table_name:
+                ref_value = record.get(rel.field)
+                if ref_value:
+                    fk_value = self._lookup_cache.get(
+                        rel.references, {}
+                    ).get(ref_value)
+                    if fk_value is not None:
+                        row_data[rel.fk_column] = fk_value
+
+        return row_data
+
+    async def _insert_one_record(
+        self,
+        session,
+        record: dict,
+        table_order: list[str],
+        table_fields: dict,
+        junctions: list,
+        belongs_tos: list,
+        audit_logger: "AuditLogger | None" = None,
+    ) -> None:
+        """Insert a single record across all relevant tables and junctions.
+
+        Mutates ``self._lookup_cache`` and uses the provided session. Caller
+        is responsible for transaction boundaries.
+        """
+        # Track inserted IDs for this record per table
+        record_ids: dict[str, any] = {}
+
+        for table_name in table_order:
+            model = self._models[table_name]
+            pk_config = self._config.schema_.tables[table_name].primary_key
+
+            row_data = self._build_row_data_for_table(
+                record, table_name, pk_config, table_fields, belongs_tos,
+            )
+
+            # Skip if no data columns for an auto_increment table
+            if not row_data and pk_config.type == "auto_increment":
+                continue
+
+            table_cfg = self._config.schema_.tables[table_name]
+            if table_cfg.on_conflict is None or table_cfg.on_conflict.action == "error":
+                # No upsert configured (or action=error) — use ORM insert as before
+                instance = model(**row_data)
+                session.add(instance)
+                await session.flush()
+                pk_value = getattr(instance, pk_config.column)
+                if audit_logger is not None:
+                    audit_logger.record(AuditEntry(
+                        target_table=table_name,
+                        target_pk=str(pk_value),
+                        action="insert",
+                    ))
+            else:
+                # Upsert path
+                pk_value, action, field_changes = await self._upsert_executor.execute(
+                    session, model, row_data, pk_config, table_cfg.on_conflict,
+                )
+                # action is None for no-op upserts (existing row, no real change)
+                if audit_logger is not None and action is not None:
+                    audit_logger.record(AuditEntry(
+                        target_table=table_name,
+                        target_pk=str(pk_value),
+                        action=action,
+                        field_changes=field_changes,
+                    ))
+
+            record_ids[table_name] = pk_value
+
+            # Update lookup cache for belongs_to resolution
+            for rel in belongs_tos:
+                if rel.references == table_name:
+                    resolve_col = rel.resolve_by
+                    resolve_val = row_data.get(resolve_col)
+                    if resolve_val:
+                        self._lookup_cache[table_name][resolve_val] = pk_value
+
+        # Insert junction rows for this record
+        for junc in junctions:
+            t1, t2 = junc.link
+            if t1 in record_ids and t2 in record_ids:
+                junc_model = self._models[junc.through]
+                junc_row = junc_model(
+                    **{
+                        junc.columns[t1]: record_ids[t1],
+                        junc.columns[t2]: record_ids[t2],
+                    }
+                )
+                session.add(junc_row)
 
     def generate_sql_preview(self, records: list[dict]) -> list[str]:
         """Generate a preview of SQL INSERT statements (for HITL review).

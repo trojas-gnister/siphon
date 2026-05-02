@@ -1,0 +1,57 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Cases>
+  <Case>
+    <CaseCode>abc-123</CaseCode>
+    <ReportNumber>RPT001</ReportNumber>
+    <CaseStatus>Closed</CaseStatus>
+    <OrgName>Acme Corp</OrgName>
+    <LocationAddress>123 Main St</LocationAddress>
+    <LocationCity>Springfield</LocationCity>
+    <LocationState>IL</LocationState>
+    <Details>Test incident details</Details>
+    <DateOpened>2025-01-15 00:00:00.000</DateOpened>
+    <CaseNotes>
+      <CaseNote>
+        <CaseNote>First note text</CaseNote>
+        <Date>2025-01-16 10:00:00.000</Date>
+        <UserName>Smith, John</UserName>
+      </CaseNote>
+      <CaseNote>
+        <CaseNote>Second note text</CaseNote>
+        <Date>2025-01-17 10:00:00.000</Date>
+        <UserName>Doe, Jane</UserName>
+      </CaseNote>
+    </CaseNotes>
+    <Participants>
+      <Participant>
+        <FirstName>Jane</FirstName>
+        <LastName>Doe</LastName>
+        <Role>Reporter</Role>
+      </Participant>
+      <Participant>
+        <FirstName>Bob</FirstName>
+        <LastName>Smith</LastName>
+        <Role>Witness</Role>
+      </Participant>
+    </Participants>
+    <Attachments>
+      <Attachment>
+        <FileName>report.pdf</FileName>
+        <FileCode>FC001</FileCode>
+        <DateUploaded>2025-01-17 00:00:00.000</DateUploaded>
+        <Size>1024</Size>
+      </Attachment>
+    </Attachments>
+  </Case>
+  <Case>
+    <CaseCode>def-456</CaseCode>
+    <ReportNumber>RPT002</ReportNumber>
+    <CaseStatus>In Process</CaseStatus>
+    <OrgName>Beta Inc</OrgName>
+    <LocationAddress>456 Oak Ave</LocationAddress>
+    <LocationCity>Denver</LocationCity>
+    <LocationState>CO</LocationState>
+    <Details>Another incident</Details>
+    <DateOpened>2025-02-01 00:00:00.000</DateOpened>
+  </Case>
+</Cases>

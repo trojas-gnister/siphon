@@ -18,55 +18,148 @@ from siphon.utils.errors import ConfigError
 _ENV_VAR_RE = re.compile(r"\$\{([^}]+)\}")
 
 
-def _substitute_env_vars(value: Any) -> Any:
+def _substitute_env_vars(
+    value: Any,
+    variables: dict[str, Any] | None = None,
+    source: str | Path | None = None,
+) -> Any:
     """Recursively substitute ${VAR_NAME} references in a parsed YAML structure.
 
-    Raises ConfigError if a referenced variable is not set.
+    Resolution order:
+    1. The ``variables`` dict extracted from the config (if provided).
+    2. Process environment variables.
+
+    Raises ConfigError if a referenced variable is not set in either source.
     """
     if isinstance(value, str):
         def _replace(match: re.Match) -> str:
             var_name = match.group(1)
+            # 1. Try the config variables section first.
+            if variables is not None and var_name in variables:
+                return str(variables[var_name])
+            # 2. Fall back to process environment.
             result = os.environ.get(var_name)
             if result is None:
+                location = f" in '{source}'" if source else ""
                 raise ConfigError(
-                    f"Environment variable '${{{var_name}}}' is not set"
+                    f"Environment variable '{var_name}' is referenced{location} but is not set. "
+                    f"Set it (e.g., export {var_name}=...) or add it to a .env file "
+                    f"in the same directory as the config."
                 )
             return result
 
         return _ENV_VAR_RE.sub(_replace, value)
 
     if isinstance(value, dict):
-        return {k: _substitute_env_vars(v) for k, v in value.items()}
+        return {k: _substitute_env_vars(v, variables, source) for k, v in value.items()}
 
     if isinstance(value, list):
-        return [_substitute_env_vars(item) for item in value]
+        return [_substitute_env_vars(item, variables, source) for item in value]
 
     return value
 
 
+def _validate_field(field: Any, config: "SiphonConfig", context: str = "") -> None:
+    """Validate a single field's cross-field constraints.
+
+    Args:
+        field: The FieldConfig instance to validate.
+        config: The top-level SiphonConfig (used to check transforms.file).
+        context: Optional human-readable context prefix for error messages
+                 (e.g. "collection 'notes' ").
+    """
+    prefix = f"{context}Field" if not context else f"{context}field"
+    if field.type == "enum":
+        if field.values is None and field.preset is None:
+            raise ConfigError(
+                f"{prefix} '{field.name}' has type 'enum' but is missing both "
+                "'values' and 'preset'. "
+                "Add either: values: [A, B, C] OR preset: us_states"
+            )
+    elif field.type == "regex":
+        if field.pattern is None:
+            raise ConfigError(
+                f"{prefix} '{field.name}' has type 'regex' but is missing 'pattern'. "
+                "Add: pattern: '^...$'"
+            )
+    elif field.type == "subdivision":
+        if field.country_code is None:
+            raise ConfigError(
+                f"{prefix} '{field.name}' has type 'subdivision' but is missing "
+                "'country_code'. "
+                "Add: country_code: US (or appropriate ISO 3166-1 alpha-2 code)"
+            )
+
+    # Custom transforms require transforms.file to be configured.
+    if (
+        field.transform is not None
+        and field.transform.type == "custom"
+        and (config.transforms is None or not config.transforms.file)
+    ):
+        raise ConfigError(
+            f"{prefix} '{field.name}' uses transform type 'custom' but "
+            "'transforms.file' is not configured. "
+            "Add a transforms: file: path/to/transforms.py entry to your config."
+        )
+
+
+def _validate_field_type_requirements(config: SiphonConfig) -> None:
+    """Enforce that enum needs values/preset, regex needs pattern,
+    subdivision needs country_code, and custom transforms have a file."""
+    for field in config.schema_.fields or []:
+        _validate_field(field, config)
+
+    if config.schema_.collections:
+        for collection in config.schema_.collections:
+            for field in collection.fields:
+                _validate_field(field, config, context=f"In collection '{collection.name}', ")
+
+
+def _validate_on_conflict_keys(config: SiphonConfig) -> None:
+    """Validate that on_conflict.key entries reference real schema fields."""
+    known_field_names = {f.name for f in config.schema_.fields or []}
+    if config.schema_.collections:
+        for collection in config.schema_.collections:
+            for field in collection.fields:
+                known_field_names.add(field.name)
+
+    for table_name, table_cfg in config.schema_.tables.items():
+        if table_cfg.on_conflict is None:
+            continue
+        for key_field in table_cfg.on_conflict.key:
+            if key_field not in known_field_names:
+                raise ConfigError(
+                    f"Table '{table_name}' on_conflict.key references unknown "
+                    f"field '{key_field}'. Known fields: {sorted(known_field_names)}"
+                )
+
+
+def _validate_join_source_references(config: SiphonConfig) -> None:
+    """Validate join.left and join.right reference declared sources."""
+    if not (config.sources and config.joins):
+        return
+    source_names = {s.name for s in config.sources}
+    for i, j in enumerate(config.joins):
+        if j.left not in source_names:
+            raise ConfigError(
+                f"join[{i}].left='{j.left}' is not a declared source. "
+                f"Known sources: {sorted(source_names)}"
+            )
+        if j.right not in source_names:
+            raise ConfigError(
+                f"join[{i}].right='{j.right}' is not a declared source. "
+                f"Known sources: {sorted(source_names)}"
+            )
+
+
 def _cross_validate(config: SiphonConfig) -> None:
-    """Apply cross-validation rules that depend on field `type`.
+    """Apply cross-validation rules that depend on multiple config fields.
 
     Raises ConfigError for any violation.
     """
-    for field in config.schema_.fields:
-        if field.type == "enum":
-            if field.values is None and field.preset is None:
-                raise ConfigError(
-                    f"Field '{field.name}' has type 'enum' but is missing both "
-                    "'values' and 'preset'; at least one is required."
-                )
-        elif field.type == "regex":
-            if field.pattern is None:
-                raise ConfigError(
-                    f"Field '{field.name}' has type 'regex' but is missing 'pattern'."
-                )
-        elif field.type == "subdivision":
-            if field.country_code is None:
-                raise ConfigError(
-                    f"Field '{field.name}' has type 'subdivision' but is missing "
-                    "'country_code'."
-                )
+    _validate_field_type_requirements(config)
+    _validate_on_conflict_keys(config)
+    _validate_join_source_references(config)
 
 
 def load_config(path: str | Path) -> SiphonConfig:
@@ -75,7 +168,8 @@ def load_config(path: str | Path) -> SiphonConfig:
     Steps:
     1. Look for a .env file in the same directory; load via python-dotenv.
     2. Read the YAML file.
-    3. Recursively substitute ${ENV_VAR} references in all string values.
+    3. Recursively substitute ${VAR} references — config ``variables`` section
+       takes priority, then process environment variables.
     4. Parse into SiphonConfig via Pydantic.
     5. Cross-validate field type requirements.
     6. Return SiphonConfig.
@@ -94,21 +188,29 @@ def load_config(path: str | Path) -> SiphonConfig:
     try:
         raw_text = config_path.read_text(encoding="utf-8")
     except OSError as exc:
-        raise ConfigError(f"Cannot read config file '{config_path}': {exc}") from exc
+        raise ConfigError(
+            f"Cannot read config file '{config_path}': {exc}. "
+            f"Check the path is correct and you have read permission."
+        ) from exc
 
     try:
         raw_data = yaml.safe_load(raw_text)
     except yaml.YAMLError as exc:
-        raise ConfigError(f"Invalid YAML in '{config_path}': {exc}") from exc
+        raise ConfigError(
+            f"Failed to parse YAML config at '{config_path}': {exc}\n"
+            f"Common causes: indentation errors, unquoted special characters, or missing colons."
+        ) from exc
 
     if not isinstance(raw_data, dict):
         raise ConfigError(
-            f"Config file '{config_path}' must contain a YAML mapping at the top level."
+            f"Config file '{config_path}' must contain a YAML mapping at the top level, "
+            f"but got {type(raw_data).__name__}. Check that your YAML file starts with key: value pairs."
         )
 
-    # 3. Substitute ${ENV_VAR} references.
+    # 3. Substitute ${VAR} references — config variables take priority over env vars.
+    variables: dict[str, Any] | None = raw_data.get("variables")
     try:
-        data = _substitute_env_vars(raw_data)
+        data = _substitute_env_vars(raw_data, variables=variables, source=config_path)
     except ConfigError:
         raise
 
@@ -117,7 +219,7 @@ def load_config(path: str | Path) -> SiphonConfig:
         config = SiphonConfig.model_validate(data)
     except ValidationError as exc:
         raise ConfigError(
-            f"Config validation failed for '{config_path}': {exc}"
+            f"Invalid config at '{config_path}':\n{exc}"
         ) from exc
 
     # 5. Cross-validate field type requirements.

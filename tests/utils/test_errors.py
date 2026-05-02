@@ -8,6 +8,8 @@ from siphon.utils.errors import (
     ExtractionError,
     ReviewError,
     SiphonError,
+    SourceError,
+    TransformError,
     ValidationError,
 )
 
@@ -17,7 +19,8 @@ from siphon.utils.errors import (
 
 _SUBCLASSES = [
     ConfigError,
-    ExtractionError,
+    SourceError,
+    TransformError,
     ValidationError,
     DatabaseError,
     ReviewError,
@@ -94,7 +97,34 @@ class TestConfigError:
         assert isinstance(ConfigError("bad config"), ConfigError)
 
 
+class TestSourceError:
+    def test_is_source_error(self):
+        assert isinstance(SourceError("file not found"), SourceError)
+
+    def test_is_subclass_of_siphon_error(self):
+        assert issubclass(SourceError, SiphonError)
+
+    def test_stores_message(self):
+        err = SourceError("parse error")
+        assert err.message == "parse error"
+
+
+class TestTransformError:
+    def test_is_transform_error(self):
+        assert isinstance(TransformError("transform failed"), TransformError)
+
+    def test_is_subclass_of_siphon_error(self):
+        assert issubclass(TransformError, SiphonError)
+
+    def test_stores_message(self):
+        err = TransformError("bad transform")
+        assert err.message == "bad transform"
+
+
 class TestExtractionError:
+    def test_is_alias_for_source_error(self):
+        assert ExtractionError is SourceError
+
     def test_is_extraction_error(self):
         assert isinstance(ExtractionError("llm failed"), ExtractionError)
 

@@ -20,14 +20,14 @@ runner = CliRunner()
 
 _VALID_YAML = """\
 name: test_pipeline
-llm:
-  base_url: http://localhost:11434/v1
-  model: llama3
+source:
+  type: spreadsheet
 database:
   url: sqlite:///test.db
 schema:
   fields:
     - name: company_name
+      source: "Company Name"
       type: string
       db:
         table: companies
@@ -38,7 +38,6 @@ schema:
         column: id
         type: auto_increment
 pipeline:
-  chunk_size: 10
   log_level: info
   review: false
 """
@@ -66,7 +65,7 @@ def _write_valid_config(tmp_path: Path) -> Path:
 
 
 def _write_invalid_config(tmp_path: Path) -> Path:
-    """Write an invalid siphon.yaml (missing llm section) and return its path."""
+    """Write an invalid siphon.yaml (missing required sections) and return its path."""
     p = tmp_path / "siphon.yaml"
     p.write_text(_INVALID_YAML)
     return p
@@ -115,7 +114,7 @@ class TestHelp:
         assert "--dry-run" in result.output
         assert "--no-review" in result.output
         assert "--create-tables" in result.output
-        assert "--chunk-size" in result.output
+        assert "--chunk-size" not in result.output
         assert "--verbose" in result.output
         assert "--quiet" in result.output
 
@@ -206,8 +205,10 @@ class TestRunCommand:
 
         with patch("siphon.cli.Pipeline") as MockPipeline, \
              patch("siphon.cli.load_config") as mock_load:
-            mock_load.return_value = MagicMock()
-            mock_load.return_value.pipeline.log_level = "info"
+            mock_cfg = MagicMock()
+            mock_cfg.pipeline.log_level = "info"
+            mock_cfg.sources = None  # single-source config
+            mock_load.return_value = mock_cfg
 
             mock_instance = MagicMock()
             mock_instance.run = AsyncMock(return_value=self._make_mock_result(dry_run=True, total_inserted=0))
@@ -229,6 +230,7 @@ class TestRunCommand:
              patch("siphon.cli.load_config") as mock_load:
             mock_cfg = MagicMock()
             mock_cfg.pipeline.log_level = "info"
+            mock_cfg.sources = None  # single-source config
             mock_load.return_value = mock_cfg
 
             mock_instance = MagicMock()
@@ -255,6 +257,7 @@ class TestRunCommand:
              patch("siphon.cli.load_config") as mock_load:
             mock_cfg = MagicMock()
             mock_cfg.pipeline.log_level = "info"
+            mock_cfg.sources = None  # single-source config
             mock_load.return_value = mock_cfg
 
             mock_instance = MagicMock()
@@ -300,13 +303,14 @@ class TestRunCommand:
         assert "Unexpected error" in result.output or "something broke" in result.output
 
     def test_run_passes_pipeline_args(self, tmp_path: Path):
-        """run passes dry_run, no_review, create_tables, and chunk_size to pipeline.run."""
+        """run passes dry_run, no_review, create_tables, and sheet to pipeline.run."""
         config_file = _write_valid_config(tmp_path)
 
         with patch("siphon.cli.Pipeline") as MockPipeline, \
              patch("siphon.cli.load_config") as mock_load:
             mock_cfg = MagicMock()
             mock_cfg.pipeline.log_level = "info"
+            mock_cfg.sources = None  # single-source config
             mock_load.return_value = mock_cfg
 
             mock_instance = MagicMock()
@@ -319,7 +323,6 @@ class TestRunCommand:
                 "--dry-run",
                 "--no-review",
                 "--create-tables",
-                "--chunk-size", "5",
             ])
 
         mock_instance.run.assert_awaited_once_with(
@@ -327,8 +330,9 @@ class TestRunCommand:
             dry_run=True,
             no_review=True,
             create_tables=True,
-            chunk_size=5,
             sheet=None,
+            resume=False,
+            user=None,
         )
 
 
@@ -348,6 +352,7 @@ class TestLogLevelOverrides:
              patch("siphon.cli.load_config") as mock_load:
             mock_cfg = MagicMock()
             mock_cfg.pipeline.log_level = "info"
+            mock_cfg.sources = None  # single-source config
             mock_load.return_value = mock_cfg
 
             def _capture_log_level(cfg):
@@ -376,6 +381,7 @@ class TestLogLevelOverrides:
              patch("siphon.cli.load_config") as mock_load:
             mock_cfg = MagicMock()
             mock_cfg.pipeline.log_level = "info"
+            mock_cfg.sources = None  # single-source config
             mock_load.return_value = mock_cfg
 
             def _capture_log_level(cfg):
@@ -404,6 +410,7 @@ class TestLogLevelOverrides:
              patch("siphon.cli.load_config") as mock_load:
             mock_cfg = MagicMock()
             mock_cfg.pipeline.log_level = "warning"
+            mock_cfg.sources = None  # single-source config
             mock_load.return_value = mock_cfg
 
             def _capture_log_level(cfg):
@@ -483,6 +490,7 @@ class TestSummaryWithSkippedChunks:
              patch("siphon.cli.load_config") as mock_load:
             mock_cfg = MagicMock()
             mock_cfg.pipeline.log_level = "info"
+            mock_cfg.sources = None  # single-source config
             mock_load.return_value = mock_cfg
 
             mock_instance = MagicMock()
@@ -503,3 +511,201 @@ class TestSummaryWithSkippedChunks:
 
         assert result.exit_code == 0
         assert "Skipped" in result.output or "skipped" in result.output.lower()
+
+
+class TestResumeAndBatchSizeFlags:
+    def test_resume_flag_passed_to_pipeline(self, tmp_path):
+        from unittest.mock import AsyncMock, MagicMock, patch
+        from siphon.core.pipeline import PipelineResult
+
+        config_file = _write_valid_config(tmp_path)
+
+        with patch("siphon.cli.Pipeline") as MockPipeline, \
+             patch("siphon.cli.load_config") as mock_load:
+            mock_cfg = MagicMock()
+            mock_cfg.pipeline.log_level = "info"
+            mock_cfg.sources = None  # single-source config
+            mock_load.return_value = mock_cfg
+            mock_instance = MagicMock()
+            mock_instance.run = AsyncMock(return_value=PipelineResult())
+            MockPipeline.return_value = mock_instance
+
+            runner.invoke(app, [
+                "run", "input.csv",
+                "--config", str(config_file),
+                "--no-review",
+                "--resume",
+            ])
+
+        kwargs = mock_instance.run.call_args.kwargs
+        assert kwargs["resume"] is True
+
+    def test_batch_size_flag_overrides_config(self, tmp_path):
+        from unittest.mock import AsyncMock, MagicMock, patch
+        from siphon.core.pipeline import PipelineResult
+
+        config_file = _write_valid_config(tmp_path)
+
+        with patch("siphon.cli.Pipeline") as MockPipeline, \
+             patch("siphon.cli.load_config") as mock_load:
+            mock_cfg = MagicMock()
+            mock_cfg.pipeline.log_level = "info"
+            mock_cfg.pipeline.batch_size = 500  # original config value
+            mock_cfg.sources = None  # single-source config
+            mock_load.return_value = mock_cfg
+            mock_instance = MagicMock()
+            mock_instance.run = AsyncMock(return_value=PipelineResult())
+            MockPipeline.return_value = mock_instance
+
+            runner.invoke(app, [
+                "run", "input.csv",
+                "--config", str(config_file),
+                "--no-review",
+                "--batch-size", "10",
+            ])
+
+        # The CLI overwrites the config's batch_size before constructing Pipeline
+        assert mock_cfg.pipeline.batch_size == 10
+
+    def test_resume_default_is_false(self, tmp_path):
+        from unittest.mock import AsyncMock, MagicMock, patch
+        from siphon.core.pipeline import PipelineResult
+
+        config_file = _write_valid_config(tmp_path)
+
+        with patch("siphon.cli.Pipeline") as MockPipeline, \
+             patch("siphon.cli.load_config") as mock_load:
+            mock_cfg = MagicMock()
+            mock_cfg.pipeline.log_level = "info"
+            mock_cfg.sources = None  # single-source config
+            mock_load.return_value = mock_cfg
+            mock_instance = MagicMock()
+            mock_instance.run = AsyncMock(return_value=PipelineResult())
+            MockPipeline.return_value = mock_instance
+
+            runner.invoke(app, [
+                "run", "input.csv", "--config", str(config_file), "--no-review",
+            ])
+
+        kwargs = mock_instance.run.call_args.kwargs
+        assert kwargs.get("resume", False) is False
+
+
+class TestUserFlag:
+    def test_user_flag_passed_to_pipeline(self, tmp_path):
+        from unittest.mock import AsyncMock, MagicMock, patch
+        from siphon.core.pipeline import PipelineResult
+
+        config_file = _write_valid_config(tmp_path)
+
+        with patch("siphon.cli.Pipeline") as MockPipeline, \
+             patch("siphon.cli.load_config") as mock_load:
+            mock_cfg = MagicMock()
+            mock_cfg.pipeline.log_level = "info"
+            mock_cfg.sources = None  # single-source config
+            mock_load.return_value = mock_cfg
+            mock_instance = MagicMock()
+            mock_instance.run = AsyncMock(return_value=PipelineResult())
+            MockPipeline.return_value = mock_instance
+
+            runner.invoke(app, [
+                "run", "input.csv",
+                "--config", str(config_file),
+                "--no-review",
+                "--user", "alice",
+            ])
+
+        kwargs = mock_instance.run.call_args.kwargs
+        assert kwargs["user"] == "alice"
+
+    def test_user_default_is_none(self, tmp_path):
+        from unittest.mock import AsyncMock, MagicMock, patch
+        from siphon.core.pipeline import PipelineResult
+
+        config_file = _write_valid_config(tmp_path)
+
+        with patch("siphon.cli.Pipeline") as MockPipeline, \
+             patch("siphon.cli.load_config") as mock_load:
+            mock_cfg = MagicMock()
+            mock_cfg.pipeline.log_level = "info"
+            mock_cfg.sources = None  # single-source config
+            mock_load.return_value = mock_cfg
+            mock_instance = MagicMock()
+            mock_instance.run = AsyncMock(return_value=PipelineResult())
+            MockPipeline.return_value = mock_instance
+
+            runner.invoke(app, [
+                "run", "input.csv", "--config", str(config_file), "--no-review",
+            ])
+
+        kwargs = mock_instance.run.call_args.kwargs
+        assert kwargs.get("user") is None
+
+
+class TestMultiSourceCLI:
+    def test_run_without_input_path_works_with_sources_config(self, tmp_path):
+        from unittest.mock import AsyncMock, MagicMock, patch
+        from siphon.core.pipeline import PipelineResult
+
+        # Build a config that uses `sources:` (no top-level source/fields)
+        config_yaml = """
+name: multi
+sources:
+  - name: a
+    type: spreadsheet
+    path: "./a.csv"
+    fields:
+      - name: x
+        source: "X"
+        type: string
+        required: true
+        db: { table: t, column: x }
+database: { url: "sqlite:///t.db" }
+schema:
+  tables:
+    t: { primary_key: { column: id, type: auto_increment } }
+pipeline: { review: false }
+"""
+        config_file = tmp_path / "siphon.yaml"
+        config_file.write_text(config_yaml)
+
+        with patch("siphon.cli.Pipeline") as MockPipeline, \
+             patch("siphon.cli.load_config") as mock_load:
+            mock_cfg = MagicMock()
+            mock_cfg.pipeline.log_level = "info"
+            mock_cfg.sources = [MagicMock()]  # truthy
+            mock_load.return_value = mock_cfg
+            mock_instance = MagicMock()
+            mock_instance.run = AsyncMock(return_value=PipelineResult())
+            MockPipeline.return_value = mock_instance
+
+            # Invoke without a positional input path
+            result = runner.invoke(app, [
+                "run", "--config", str(config_file), "--no-review",
+            ])
+
+        # Should not error out for missing input_path
+        assert result.exit_code == 0
+
+    def test_run_without_input_path_and_without_sources_errors(self, tmp_path):
+        from unittest.mock import AsyncMock, MagicMock, patch
+        from siphon.core.pipeline import PipelineResult
+
+        config_file = _write_valid_config(tmp_path)
+
+        with patch("siphon.cli.Pipeline") as MockPipeline, \
+             patch("siphon.cli.load_config") as mock_load:
+            mock_cfg = MagicMock()
+            mock_cfg.pipeline.log_level = "info"
+            mock_cfg.sources = None  # single-source config
+            mock_load.return_value = mock_cfg
+            mock_instance = MagicMock()
+            mock_instance.run = AsyncMock(return_value=PipelineResult())
+            MockPipeline.return_value = mock_instance
+
+            result = runner.invoke(app, [
+                "run", "--config", str(config_file), "--no-review",
+            ])
+
+        # Single-source without input_path should fail
+        assert result.exit_code != 0

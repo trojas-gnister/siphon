@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
 from typing import Optional
 
@@ -17,7 +18,7 @@ from siphon.utils.errors import SiphonError
 
 app = typer.Typer(
     name="siphon",
-    help="Configurable LLM-powered ETL pipeline",
+    help="Configurable ETL pipeline",
     no_args_is_help=True,
 )
 console = Console()
@@ -39,21 +40,26 @@ def main(
         help="Show version and exit.",
     ),
 ) -> None:
-    """Configurable LLM-powered ETL pipeline."""
+    """Configurable ETL pipeline."""
     pass
 
 
 @app.command()
 def run(
-    input_path: str = typer.Argument(..., help="Path to spreadsheet file or directory"),
+    input_path: Optional[str] = typer.Argument(
+        None, help="Path to spreadsheet file or directory (required for single-source configs)"
+    ),
     config: Path = typer.Option(Path("siphon.yaml"), "--config", "-c", help="Path to YAML config"),
     create_tables: bool = typer.Option(False, "--create-tables", help="Auto-create tables if they don't exist"),
     dry_run: bool = typer.Option(False, "--dry-run", help="Extract + validate only, no DB insertion"),
     no_review: bool = typer.Option(False, "--no-review", help="Skip HITL review, insert directly"),
-    chunk_size: Optional[int] = typer.Option(None, "--chunk-size", help="Override chunk size from config"),
     sheet: Optional[str] = typer.Option(None, "--sheet", help="Sheet name or index for multi-sheet Excel"),
+    output: str = typer.Option("table", "--output", help="Output format: table | json"),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Set log level to debug"),
     quiet: bool = typer.Option(False, "--quiet", "-q", help="Set log level to error only"),
+    resume: bool = typer.Option(False, "--resume", help="Continue from the last failed run"),
+    batch_size: Optional[int] = typer.Option(None, "--batch-size", help="Records per commit (overrides config)"),
+    user: Optional[str] = typer.Option(None, "--user", help="Username for audit trail"),
 ) -> None:
     """Execute the full ETL pipeline."""
     try:
@@ -65,19 +71,38 @@ def run(
         elif quiet:
             cfg.pipeline.log_level = "error"
 
+        if batch_size is not None:
+            cfg.pipeline.batch_size = batch_size
+
+        if cfg.sources is None and not input_path:
+            console.print(
+                "[red]Error:[/red] input_path is required when not using a multi-source (`sources:`) config"
+            )
+            raise typer.Exit(code=1)
+
+        if cfg.sources is not None and input_path:
+            console.print(
+                "[yellow]Warning:[/yellow] input_path ignored — multi-source configs use paths from YAML"
+            )
+            input_path = None
+
         pipeline = Pipeline(cfg)
         result = asyncio.run(
             pipeline.run(
-                input_path,
+                input_path or "",
                 dry_run=dry_run,
                 no_review=no_review,
                 create_tables=create_tables,
-                chunk_size=chunk_size,
                 sheet=sheet,
+                resume=resume,
+                user=user,
             )
         )
 
-        _print_summary(result)
+        if output == "json":
+            _print_json(result)
+        else:
+            _print_summary(result)
 
     except SiphonError as e:
         console.print(f"[red]Error:[/red] {e}")
@@ -104,22 +129,21 @@ def validate(
 
 INIT_TEMPLATE = '''# Siphon ETL Pipeline Configuration
 # ===================================
-# This file configures the Siphon data pipeline.
-# Uncomment and modify sections as needed.
 
 name: "my-pipeline"
 
-# LLM Configuration
-# -----------------
-# Siphon uses any OpenAI-compatible API for data extraction.
-# Works with: OpenAI, Ollama, vLLM, LM Studio
-llm:
-  base_url: "http://localhost:11434/v1"  # Ollama default
-  model: "llama3"
-  api_key: ""  # Required for OpenAI, optional for local models
-  # extraction_hints: |
-  #   Optional domain-specific instructions for the LLM.
-  #   Example: "If company name is missing, use city name instead."
+# Source Configuration
+# --------------------
+# Supported types: spreadsheet (CSV/XLSX/XLS/ODS), xml, json
+source:
+  type: spreadsheet
+  # For XML/JSON sources:
+  # type: xml
+  # root: "Records.Record"    # Dot-path to record list
+  # encoding: utf-8           # utf-8 or utf-16-le
+  # force_list:               # Elements always parsed as lists
+  #   - Item
+  #   - Note
 
 # Database Configuration
 # ----------------------
@@ -131,12 +155,23 @@ llm:
 database:
   url: "${DATABASE_URL}"  # Environment variable substitution supported
 
+# Variables (reusable values for templates and constants)
+# variables:
+#   reference_prefix: "IMPORT"
+#   user_id: 1
+
+# Custom Transforms (Python file with transform functions)
+# transforms:
+#   file: ./my_transforms.py
+
 # Schema Definition
 # -----------------
 schema:
   fields:
-    # String field (strips whitespace)
+    # String field with source column mapping
     - name: company_name
+      source: "Company Name"
+      aliases: ["Corp Name", "Business", "Entity"]
       type: string
       required: true
       min_length: 2
@@ -145,8 +180,40 @@ schema:
         table: companies
         column: name
 
+    # Field with constant value
+    # - name: is_imported
+    #   value: true
+    #   type: boolean
+    #   db:
+    #     table: companies
+    #     column: is_imported
+
+    # Field with template transform
+    # - name: reference_id
+    #   source: case_code
+    #   transform:
+    #     type: template
+    #     template: "{reference_prefix}-{value}"
+    #   db:
+    #     table: records
+    #     column: reference_id
+
+    # Field with map transform
+    # - name: status_id
+    #   source: status
+    #   transform:
+    #     type: map
+    #     values:
+    #       Active: 1
+    #       Closed: 2
+    #     default: 0
+    #   db:
+    #     table: records
+    #     column: status_id
+
     # Phone field (formats as US phone number)
     # - name: phone
+    #   source: "Phone Number"
     #   type: phone
     #   db:
     #     table: companies
@@ -154,6 +221,7 @@ schema:
 
     # URL field (prepends http:// if missing)
     # - name: website
+    #   source: "Website"
     #   type: url
     #   db:
     #     table: companies
@@ -161,6 +229,7 @@ schema:
 
     # Email field (lowercased)
     # - name: email
+    #   source: "Email"
     #   type: email
     #   db:
     #     table: companies
@@ -168,6 +237,7 @@ schema:
 
     # Integer field
     # - name: employee_count
+    #   source: "Employees"
     #   type: integer
     #   min: 0
     #   max: 1000000
@@ -177,6 +247,7 @@ schema:
 
     # Number (float) field
     # - name: revenue
+    #   source: "Revenue"
     #   type: number
     #   db:
     #     table: companies
@@ -184,6 +255,7 @@ schema:
 
     # Currency field (strips $, commas; returns Decimal)
     # - name: annual_revenue
+    #   source: "Annual Revenue"
     #   type: currency
     #   db:
     #     table: companies
@@ -191,6 +263,7 @@ schema:
 
     # Date field (flexible input, configurable output format)
     # - name: founded_date
+    #   source: "Founded"
     #   type: date
     #   format: "%Y-%m-%d"
     #   db:
@@ -199,6 +272,7 @@ schema:
 
     # Datetime field
     # - name: last_updated
+    #   source: "Last Updated"
     #   type: datetime
     #   format: "%Y-%m-%dT%H:%M:%S"
     #   db:
@@ -207,6 +281,7 @@ schema:
 
     # Enum field (with explicit values)
     # - name: status
+    #   source: "Status"
     #   type: enum
     #   values: [active, inactive, pending]
     #   case: upper  # upper | lower | preserve
@@ -216,6 +291,7 @@ schema:
 
     # Enum field (with preset -- US states via pycountry)
     # - name: state
+    #   source: "State"
     #   type: enum
     #   preset: us_states
     #   db:
@@ -224,6 +300,7 @@ schema:
 
     # Boolean field (detects yes/no/true/false/1/0)
     # - name: is_active
+    #   source: "Active"
     #   type: boolean
     #   db:
     #     table: companies
@@ -231,6 +308,7 @@ schema:
 
     # Regex field (validates against pattern)
     # - name: tax_id
+    #   source: "Tax ID"
     #   type: regex
     #   pattern: "^\\\\d{2}-\\\\d{7}$"
     #   db:
@@ -239,6 +317,7 @@ schema:
 
     # Subdivision field (ISO 3166-2 subdivision codes)
     # - name: province
+    #   source: "Province"
     #   type: subdivision
     #   country_code: CA  # ISO 3166-1 alpha-2 country code
     #   db:
@@ -247,6 +326,7 @@ schema:
 
     # Country field (ISO 3166-1 alpha-2 country codes)
     # - name: country
+    #   source: "Country"
     #   type: country
     #   db:
     #     table: addresses
@@ -258,11 +338,30 @@ schema:
         column: id
         type: auto_increment  # auto_increment | uuid
 
+      # Conflict resolution (optional) — what to do when a row with the same
+      # unique key already exists in the database.
+      # on_conflict:
+      #   key: [name]              # field names that form the unique key (composite supported)
+      #   action: update           # update | skip | error (default: error)
+      #   update_columns: all      # all | [list of column names to update]
+
   # Deduplication (optional)
   # deduplication:
   #   key: [company_name]       # Fields to match on
   #   check_db: true            # Also check existing DB rows
   #   match: case_insensitive   # exact | case_insensitive
+
+  # Collections (for nested XML/JSON data)
+  # collections:
+  #   - name: notes
+  #     source_path: "Notes.Note"
+  #     fields:
+  #       - name: note_text
+  #         source: Text
+  #         type: string
+  #         db:
+  #           table: notes
+  #           column: content
 
 # Relationships (optional)
 # relationships:
@@ -284,7 +383,6 @@ schema:
 
 # Pipeline Options
 pipeline:
-  chunk_size: 25        # Rows per LLM extraction batch
   review: true          # Enable human-in-the-loop review
   log_level: info       # debug | info | warning | error
   # log_dir: ./logs     # Directory for log files
@@ -324,6 +422,49 @@ def _print_summary(result: PipelineResult) -> None:
         table.add_row("Skipped Chunks", str(len(result.skipped_chunks)))
 
     console.print(table)
+
+    if result.diff is not None:
+        _print_diff(result.diff)
+
+
+def _print_diff(diff: dict) -> None:
+    """Print the dry-run diff as a Rich table."""
+    table = Table(title="Pipeline Diff (dry run)")
+    table.add_column("Action", style="bold")
+    table.add_column("Count", justify="right")
+
+    table.add_row("Insert", str(len(diff.get("insert", []))))
+    table.add_row("Update", str(len(diff.get("update", []))))
+    table.add_row("Skip", str(len(diff.get("skip", []))))
+    table.add_row("No Change", str(len(diff.get("no_change", []))))
+
+    console.print(table)
+
+    updates = diff.get("update", [])
+    if updates:
+        console.print("[bold]Updates:[/bold]")
+        for u in updates[:20]:
+            key_str = ", ".join(f"{k}={v!r}" for k, v in u["key"].items())
+            for col, change in u["changes"].items():
+                console.print(
+                    f"  {key_str} → {col}: {change['old']!r} → {change['new']!r}"
+                )
+        if len(updates) > 20:
+            console.print(f"  ... and {len(updates) - 20} more")
+
+
+def _print_json(result: PipelineResult) -> None:
+    """Print the pipeline result as JSON for scripting/CI."""
+    from dataclasses import asdict
+
+    def _json_default(o):
+        try:
+            return str(o)
+        except Exception:
+            return repr(o)
+
+    payload = asdict(result)
+    print(json.dumps(payload, default=_json_default, indent=2))
 
 
 if __name__ == "__main__":
