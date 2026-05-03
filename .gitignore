@@ -84,3 +84,9 @@ logs/
 
 # Hatch
 .hatch/
+
+# Local artifacts (not for the repo)
+uv.lock
+siphon.yaml
+*.zip
+docs/superpowers/
